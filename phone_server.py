@@ -88,7 +88,7 @@ def verify(aes):
             SCAN_BEFORE = None
             SCAN_DONE = True
             SCAN_ERROR = ""
-            return True  # genuinely empty vault
+            return True
         before = msgs[-1]["id"]
 
 def _scan_worker():
@@ -139,8 +139,8 @@ def library():
                 r = requests.get(f["meta"], timeout=15)
                 r.raise_for_status()
                 m = json.loads(V.KEY["aes"].decrypt(r.content[:12], r.content[12:], None))
-                cached = {"id": fid, "name": m.get("name", "?"), "type": m.get("type") or "",
-                          "size": m.get("size", 0), "t": m.get("t", 0)}
+                cached = {"id": fid, "name": m.get("name", "?"), "folder": m.get("folder") or "",
+                          "type": m.get("type") or "", "size": m.get("size", 0), "t": m.get("t", 0)}
                 with SCAN_LOCK:
                     META_CACHE[fid] = cached
             except Exception:
@@ -245,17 +245,22 @@ def upload_start():
         abort(403)
     d = request.get_json(silent=True) or {}
     name = os.path.basename(str(d.get("name") or "file").replace("\\", "/"))[:200] or "file"
+    raw_folder = str(d.get("folder") or "").replace("\\", "/").strip("/")
+    folder_parts = [part[:100] for part in raw_folder.split("/") if part and part not in (".", "..")]
+    folder = "/".join(folder_parts)[:400]
     size = max(0, int(d.get("size", 0)))
     mime = str(d.get("type") or mimetypes.guess_type(name)[0] or "")
     n = max(1, -(-size // V.CHUNK))
     fid = secrets.token_hex(6)
-    meta = json.dumps({"name": name, "type": mime, "size": size, "t": int(time.time() * 1000)}).encode()
+    meta = json.dumps({"name": name, "folder": folder, "type": mime, "size": size,
+                       "t": int(time.time() * 1000)}).encode()
     resp = V.dc("POST", f"/channels/{V.CH}/messages", data={"content": f"v1 {fid} m {n}"}, files={"files[0]": (f"m{fid}.bin", seal(meta))})
     try:
         url = resp.json()["attachments"][0]["url"]
         with SCAN_LOCK:
             SCAN_FOUND[fid] = {"meta": url, "chunks": {}, "n": n}
-            META_CACHE[fid] = {"id": fid, "name": name, "type": mime, "size": size, "t": int(time.time() * 1000)}
+            META_CACHE[fid] = {"id": fid, "name": name, "folder": folder, "type": mime,
+                               "size": size, "t": int(time.time() * 1000)}
     except Exception:
         pass
     UPLOADS[fid] = {"n": n}
