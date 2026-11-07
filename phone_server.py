@@ -58,31 +58,37 @@ def _get_page(before=None):
     return V.dc("GET", f"/channels/{V.CH}/messages", params=params).json()
 
 def verify(aes):
-    """Validate against recent metadata, seeding the shared scan for the library."""
+    """Validate using the newest metadata available, then seed the background scan."""
     global SCAN_BEFORE, SCAN_DONE, SCAN_ERROR
     before = None
     while True:
         msgs = _get_page(before)
         _add_messages(msgs)
-        with SCAN_LOCK:
-            candidates = [f["meta"] for f in SCAN_FOUND.values() if f.get("meta")]
-        for url in candidates:
-            try:
-                r = requests.get(url, timeout=20)
-                r.raise_for_status()
-                c = r.content
-                if len(c) > 12:
-                    aes.decrypt(c[:12], c[12:], None)
-                    SCAN_BEFORE = msgs[-1]["id"] if len(msgs) == 100 else None
-                    SCAN_DONE = len(msgs) < 100
-                    SCAN_ERROR = ""
-                    return True
-            except Exception:
-                continue
+        page_metas = []
+        for msg in msgs:
+            p = msg.get("content", "").split()
+            if len(p) >= 4 and p[0] == "v1" and p[2] == "m" and msg.get("attachments"):
+                page_metas.append(msg["attachments"][0]["url"])
+        if page_metas:
+            for url in page_metas:
+                try:
+                    r = requests.get(url, timeout=20)
+                    r.raise_for_status()
+                    c = r.content
+                    if len(c) > 12:
+                        aes.decrypt(c[:12], c[12:], None)
+                        SCAN_BEFORE = msgs[-1]["id"] if len(msgs) == 100 else None
+                        SCAN_DONE = len(msgs) < 100
+                        SCAN_ERROR = ""
+                        return True
+                except Exception:
+                    continue
+            return False
         if len(msgs) < 100:
             SCAN_BEFORE = None
             SCAN_DONE = True
-            return True  # empty vault
+            SCAN_ERROR = ""
+            return True  # genuinely empty vault
         before = msgs[-1]["id"]
 
 def _scan_worker():
