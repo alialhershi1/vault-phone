@@ -18,14 +18,16 @@ small{color:#9eabb9}.muted{color:#9eabb9}video{width:100%;max-height:65vh;backgr
 <div class="panel"><h2 id="playing">Player</h2><video id="video" controls playsinline></video></div>
 </section>
 <script>
-let token="";
+let token="", pollTimer=null, loading=false;
 const $=id=>document.getElementById(id);
 function auth(url){return url+(url.includes("?")?"&":"?")+"t="+encodeURIComponent(token)}
 async function api(url,opts={}){const r=await fetch(url,opts);if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
 function say(s){$("status").textContent=s}
-async function load(){const items=await (await api(auth("/api/library?refresh=1"))).json();$("items").innerHTML="";
-for(const f of items){const row=document.createElement("div");row.className="item";const left=document.createElement("div");const name=document.createElement("strong");name.textContent=f.name;const meta=document.createElement("div");meta.innerHTML="<small>"+(f.ok?"Ready":"Incomplete")+" · "+(f.size/1048576).toFixed(1)+" MB</small>";left.append(name,meta);const play=document.createElement("button");play.textContent="Play";play.disabled=!f.ok;play.onclick=()=>{ $("playing").textContent=f.name;$("video").src=auth("/api/stream/"+encodeURIComponent(f.id));$("video").load();$("video").play().catch(()=>{});};row.append(left,play);$("items").append(row)}}
-$("unlock").onclick=async()=>{try{say("Unlocking…");const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();say("Vault unlocked.")}catch(e){say(e.message)}};
+async function load(){if(loading)return;loading=true;try{const data=await (await api(auth("/api/library"))).json();const items=Array.isArray(data)?data:(data.items||[]);$("items").innerHTML="";
+for(const f of items){const row=document.createElement("div");row.className="item";const left=document.createElement("div");const name=document.createElement("strong");name.textContent=f.name;const meta=document.createElement("div");meta.innerHTML="<small>"+(f.ok?"Ready":"Incomplete")+" · "+(f.size/1048576).toFixed(1)+" MB</small>";left.append(name,meta);const play=document.createElement("button");play.textContent="Play";play.disabled=!f.ok;play.onclick=()=>{$("playing").textContent=f.name;$("video").src=auth("/api/stream/"+encodeURIComponent(f.id));$("video").load();$("video").play().catch(()=>{});};row.append(left,play);$("items").append(row)}
+if(data.scanning){say("Loading library in background… "+items.length+" file(s) found so far.");}else{say("Vault unlocked. "+items.length+" file(s) loaded.");if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
+}catch(e){say(e.message)}finally{loading=false}}
+$("unlock").onclick=async()=>{try{say("Checking password…");const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),2500)}catch(e){say(e.message)}};
 $("refresh").onclick=()=>load().catch(e=>say(e.message));
 $("lock").onclick=async()=>{try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}token="";$("video").pause();$("video").removeAttribute("src");$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";say("Locked.")};
 $("upload").onclick=async()=>{const fs=[...$("files").files];if(!fs.length){say("Choose one or more files first.");return}
