@@ -1,35 +1,126 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vault</title><style>
-:root{color-scheme:dark;font-family:system-ui;background:#101318;color:#edf2f7}*{box-sizing:border-box}
-body{margin:0;padding:22px;max-width:900px;margin:auto}h1{font-size:25px;margin:0 0 6px}p{color:#aab4c0}
-.panel{background:#1b222c;border:1px solid #303b49;border-radius:14px;padding:18px;margin:16px 0}
-input,button{font:inherit;border-radius:9px;padding:12px;border:1px solid #465366;background:#111820;color:#fff}
-input[type=password]{width:100%;margin:10px 0}button{background:#2563eb;border:0;cursor:pointer;margin:5px 5px 5px 0}
-button.secondary{background:#354252}.item{padding:13px 4px;border-bottom:1px solid #303b49;display:flex;gap:12px;align-items:center;justify-content:space-between}
-small{color:#9eabb9}.muted{color:#9eabb9}video{width:100%;max-height:65vh;background:#000;border-radius:12px;margin-top:12px}
-#status{white-space:pre-wrap;color:#93c5fd}#library{margin-top:12px}.hidden{display:none}
+<meta name="theme-color" content="#101318"><title>Vault</title><style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101318;color:#edf2f7}
+*{box-sizing:border-box}body{margin:0;padding:22px;max-width:1050px;margin-inline:auto}
+h1{font-size:25px;margin:0 0 5px}h2{font-size:18px;margin:0 0 12px}p{color:#aab4c0;margin:0}
+.panel{background:#1b222c;border:1px solid #303b49;border-radius:14px;padding:17px;margin:15px 0}
+input,button,select{font:inherit;border-radius:9px;padding:10px 12px;border:1px solid #465366;background:#111820;color:#fff}
+input[type=password],input[type=search]{width:100%;margin:9px 0}
+button{background:#2563eb;border:0;cursor:pointer;margin:4px 4px 4px 0}button:disabled{opacity:.45;cursor:not-allowed}
+button.secondary{background:#354252}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.item{padding:11px 3px;border-bottom:1px solid #303b49;display:flex;gap:12px;align-items:center;justify-content:space-between}
+.item:last-child{border-bottom:0}.item-name{min-width:0;overflow-wrap:anywhere}.item-actions{flex-shrink:0}
+small,.muted{color:#9eabb9}.hidden{display:none!important}
+video{width:100%;max-height:68vh;background:#000;border-radius:12px;margin-top:12px}
+#status{white-space:pre-wrap;color:#93c5fd;margin-top:9px;min-height:1.3em}
+.group{border:1px solid #303b49;border-radius:10px;margin:9px 0;overflow:hidden}
+.group summary{padding:12px 13px;background:#151c25;cursor:pointer;font-weight:600;display:flex;justify-content:space-between;gap:12px}
+.group-body{padding:0 12px}.count{color:#9eabb9;font-weight:400}
+.player-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+#playing{overflow-wrap:anywhere}.empty{padding:20px 5px;color:#9eabb9;text-align:center}
+@media(max-width:600px){body{padding:13px}.panel{padding:13px}.item{align-items:flex-start}.item-actions button{padding:9px}}
 </style></head><body>
 <h1>Vault</h1><p>Your encrypted library, streamed from Discord.</p>
-<section id="login" class="panel"><label for="password">Vault password</label><input id="password" type="password" autocomplete="current-password" placeholder="Enter vault password"><button id="unlock">Unlock</button></section>
+<section id="login" class="panel"><label for="password">Vault password</label><input id="password" type="password" autocomplete="current-password" placeholder="Enter the vault password"><button id="unlock">Unlock</button><div id="loginStatus" class="muted"></div></section>
 <section id="app" class="hidden">
-<div class="panel"><button id="refresh">Refresh</button><button class="secondary" id="lock">Lock</button><label><input id="files" type="file" multiple></label><button id="upload">Upload selected files</button><div id="status"></div></div>
-<div id="library" class="panel"><h2>Library</h2><div id="items"></div></div>
-<div class="panel"><h2 id="playing">Player</h2><video id="video" controls playsinline></video></div>
+<div class="panel">
+<div class="toolbar"><button id="refresh">Refresh library</button><button class="secondary" id="lock">Lock vault</button></div>
+<div class="toolbar" style="margin-top:10px">
+<label class="muted">Files <input id="files" type="file" multiple></label>
+<label class="muted">Folders <input id="folders" type="file" webkitdirectory directory multiple></label>
+<button id="upload">Upload selected</button>
+</div><div id="status"></div>
+</div>
+<div id="library" class="panel"><div class="player-head"><h2>Library</h2><small id="total"></small></div><input id="search" type="search" placeholder="Search files and folders"><div id="items"></div></div>
+<div class="panel">
+<div class="player-head"><h2 id="playing">Player</h2><small id="queueLabel">No video selected</small></div>
+<video id="video" controls playsinline preload="metadata"></video>
+<div class="toolbar" style="margin-top:9px"><button class="secondary" id="previous" disabled>Previous</button><button class="secondary" id="next" disabled>Next</button><label class="muted">Speed <select id="speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label></div>
+</div>
 </section>
 <script>
-let token="", pollTimer=null, loading=false;
+let token="",pollTimer=null,loading=false,allItems=[],playQueue=[],currentIndex=-1;
 const $=id=>document.getElementById(id);
 function auth(url){return url+(url.includes("?")?"&":"?")+"t="+encodeURIComponent(token)}
 async function api(url,opts={}){const r=await fetch(url,opts);if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
 function say(s){$("status").textContent=s}
-async function load(){if(loading)return;loading=true;try{const data=await (await api(auth("/api/library"))).json();const items=Array.isArray(data)?data:(data.items||[]);$("items").innerHTML="";
-for(const f of items){const row=document.createElement("div");row.className="item";const left=document.createElement("div");const name=document.createElement("strong");name.textContent=f.name;const meta=document.createElement("div");meta.innerHTML="<small>"+(f.ok?"Ready":"Incomplete")+" · "+(f.size/1048576).toFixed(1)+" MB</small>";left.append(name,meta);const play=document.createElement("button");play.textContent="Play";play.disabled=!f.ok;play.onclick=()=>{$("playing").textContent=f.name;$("video").src=auth("/api/stream/"+encodeURIComponent(f.id));$("video").load();$("video").play().catch(()=>{});};row.append(left,play);$("items").append(row)}
-if(data.scanning){say("Loading library in background… "+items.length+" file(s) found so far.");}else{say("Vault unlocked. "+items.length+" file(s) loaded.");if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
-}catch(e){say(e.message)}finally{loading=false}}
-$("unlock").onclick=async()=>{try{say("Checking password…");const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),2500)}catch(e){say(e.message)}};
-$("refresh").onclick=()=>load().catch(e=>say(e.message));
-$("lock").onclick=async()=>{try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}token="";$("video").pause();$("video").removeAttribute("src");$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";say("Locked.")};
-$("upload").onclick=async()=>{const fs=[...$("files").files];if(!fs.length){say("Choose one or more files first.");return}
-try{for(let fi=0;fi<fs.length;fi++){const f=fs[fi];say("Uploading "+f.name+" ("+(fi+1)+"/"+fs.length+")…");const start=await (await api(auth("/api/upload/start"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:f.name,size:f.size,type:f.type})})).json();for(let i=0;i<start.n;i++){const chunk=f.slice(i*start.chunk,Math.min(f.size,(i+1)*start.chunk));const data=await chunk.arrayBuffer();await api(auth("/api/upload/chunk?id="+encodeURIComponent(start.id)+"&i="+i),{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:data});say("Uploading "+f.name+": "+Math.round((i+1)/start.n*100)+"%")}}$("files").value="";await load();say("Upload complete.")}catch(e){say(e.message)}};
+function loginSay(s){$("loginStatus").textContent=s}
+function folderName(f){return (f.folder||"").replace(/^\/+|\/+$/g,"")||"Unsorted"}
+function isVideo(f){return (f.type||"").startsWith("video/")||/\.(mp4|m4v|webm|mov|mkv|avi|ogv)$/i.test(f.name||"")}
+function formatSize(n){n=Number(n)||0;if(n<1024*1024)return (n/1024).toFixed(0)+" KB";return (n/1048576).toFixed(1)+" MB"}
+function playAt(index){
+ if(index<0||index>=playQueue.length)return;
+ currentIndex=index;const f=playQueue[index];$("playing").textContent=f.name;$("queueLabel").textContent=(index+1)+" / "+playQueue.length;
+ $("video").src=auth("/api/stream/"+encodeURIComponent(f.id));$("video").load();$("video").play().catch(()=>{});
+ $("previous").disabled=index===0;$("next").disabled=index>=playQueue.length-1;
+}
+function moveQueue(delta){const n=currentIndex+delta;if(n>=0&&n<playQueue.length)playAt(n)}
+function render(){
+ const q=$("search").value.trim().toLowerCase();
+ const filtered=allItems.filter(f=>(f.name+" "+folderName(f)).toLowerCase().includes(q));
+ const groups=new Map();
+ for(const f of filtered){const key=folderName(f);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(f)}
+ $("items").innerHTML="";$("total").textContent=filtered.length+" of "+allItems.length+" files";
+ if(!filtered.length){$("items").innerHTML='<div class="empty">No matching files.</div>';return}
+ for(const [folder,items] of groups){
+  const details=document.createElement("details");details.className="group";details.open=!!q||folder==="Unsorted";
+  const summary=document.createElement("summary");const label=document.createElement("span");label.textContent=folder;
+  const count=document.createElement("span");count.className="count";count.textContent=items.length+" item"+(items.length===1?"":"s");summary.append(label,count);details.append(summary);
+  const body=document.createElement("div");body.className="group-body";
+  for(const f of items){
+   const row=document.createElement("div");row.className="item";const left=document.createElement("div");left.className="item-name";
+   const name=document.createElement("strong");name.textContent=f.name;const meta=document.createElement("div");const small=document.createElement("small");small.textContent=(f.ok?"Ready":"Incomplete")+" · "+formatSize(f.size);meta.append(small);left.append(name,meta);
+   const actions=document.createElement("div");actions.className="item-actions";
+   const play=document.createElement("button");play.textContent="Play";play.disabled=!f.ok||!isVideo(f);play.title=isVideo(f)?"Play video":"Not a video file";play.onclick=()=>{playQueue=allItems.filter(x=>x.ok&&isVideo(x));const idx=playQueue.findIndex(x=>x.id===f.id);playAt(idx)};
+   const download=document.createElement("button");download.className="secondary";download.textContent="Save";download.disabled=!f.ok;download.onclick=()=>{const a=document.createElement("a");a.href=auth("/api/stream/"+encodeURIComponent(f.id)+"?dl=1");a.download=f.name;document.body.append(a);a.click();a.remove()};
+   actions.append(play,download);row.append(left,actions);body.append(row)
+  }
+  details.append(body);$("items").append(details)
+ }
+}
+async function load(){
+ if(loading)return;loading=true;
+ try{
+  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);render();
+  if(data.scanning){say("Loading the rest of your library in the background · "+allItems.length+" found so far.");}
+  else{say("Vault ready · "+allItems.length+" files loaded.");if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
+  if(data.error)say("Library scan paused: "+data.error+" · Refresh to retry.");
+ }catch(e){say(e.message)}finally{loading=false}
+}
+$("unlock").onclick=async()=>{
+ try{loginSay("Checking password…");$("unlock").disabled=true;
+  const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});
+  token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();
+  if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),3000);
+ }catch(e){loginSay(e.message)}finally{$("unlock").disabled=false}
+};
+$("password").addEventListener("keydown",e=>{if(e.key==="Enter")$("unlock").click()});
+$("refresh").onclick=()=>load();$("search").addEventListener("input",render);
+$("previous").onclick=()=>moveQueue(-1);$("next").onclick=()=>moveQueue(1);
+$("video").addEventListener("ended",()=>moveQueue(1));
+$("speed").onchange=()=>{$("video").playbackRate=Number($("speed").value)};
+$("lock").onclick=async()=>{
+ try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}
+ token="";if(pollTimer)clearInterval(pollTimer);pollTimer=null;
+ $("video").pause();$("video").removeAttribute("src");$("video").load();
+ allItems=[];playQueue=[];currentIndex=-1;$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";loginSay("Vault locked.")
+};
+$("upload").onclick=async()=>{
+ const selected=[...$("files").files,...$("folders").files];const fs=[...new Map(selected.map(f=>[f.name+"|"+f.size+"|"+(f.webkitRelativePath||""),f])).values()];
+ if(!fs.length){say("Choose files or a folder first.");return}
+ try{
+  for(let fi=0;fi<fs.length;fi++){
+   const f=fs[fi],relative=f.webkitRelativePath||"",folder=relative.includes("/")?relative.slice(0,relative.lastIndexOf("/")):"";
+   say("Uploading "+(relative||f.name)+" ("+(fi+1)+"/"+fs.length+")…");
+   const start=await(await api(auth("/api/upload/start"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:f.name,folder:folder,size:f.size,type:f.type})})).json();
+   for(let i=0;i<start.n;i++){
+    const chunk=f.slice(i*start.chunk,Math.min(f.size,(i+1)*start.chunk));await api(auth("/api/upload/chunk?id="+encodeURIComponent(start.id)+"&i="+i),{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:await chunk.arrayBuffer()});
+    say("Uploading "+f.name+": "+Math.round((i+1)/start.n*100)+"% · file "+(fi+1)+"/"+fs.length)
+   }
+  }
+  $("files").value="";$("folders").value="";await load();say("Upload complete. Folder structure has been saved.")
+ }catch(e){say("Upload stopped: "+e.message)}
+};
+$("video").addEventListener("error",()=>{if($("video").currentSrc)say("The video could not be decoded by this browser. Try another supported video format.")});
 </script></body></html>
