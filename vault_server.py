@@ -21,14 +21,24 @@ _inflight = {}
 _files, _flock = {}, threading.Lock()
 
 def dc(method, path, **kw):
-    for _ in range(8):
+    # Discord rate limits channel-history pagination. Respect both the HTTP
+    # Retry-After header and JSON retry_after, and allow longer cooldowns.
+    for attempt in range(30):
         r = S.request(method, API + path, timeout=300, **kw)
         if r.status_code == 429:
-            time.sleep(float(r.json().get("retry_after", 1)) + .25)
+            try:
+                body = r.json()
+            except ValueError:
+                body = {}
+            delay = max(
+                float(r.headers.get("Retry-After", 0) or 0),
+                float(body.get("retry_after", 1) or 1)
+            ) + 0.5
+            time.sleep(min(delay, 90))
             continue
         r.raise_for_status()
         return r
-    raise RuntimeError("Discord rate limit; try again shortly.")
+    raise RuntimeError("Discord is still rate-limiting this vault. Wait briefly and retry.")
 
 def scan():
     found, before = {}, None
