@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vault</title><style>
+:root{color-scheme:dark;font-family:system-ui;background:#101318;color:#edf2f7}*{box-sizing:border-box}
+body{margin:0;padding:22px;max-width:900px;margin:auto}h1{font-size:25px;margin:0 0 6px}p{color:#aab4c0}
+.panel{background:#1b222c;border:1px solid #303b49;border-radius:14px;padding:18px;margin:16px 0}
+input,button{font:inherit;border-radius:9px;padding:12px;border:1px solid #465366;background:#111820;color:#fff}
+input[type=password]{width:100%;margin:10px 0}button{background:#2563eb;border:0;cursor:pointer;margin:5px 5px 5px 0}
+button.secondary{background:#354252}.item{padding:13px 4px;border-bottom:1px solid #303b49;display:flex;gap:12px;align-items:center;justify-content:space-between}
+small{color:#9eabb9}.muted{color:#9eabb9}video{width:100%;max-height:65vh;background:#000;border-radius:12px;margin-top:12px}
+#status{white-space:pre-wrap;color:#93c5fd}#library{margin-top:12px}.hidden{display:none}
+</style></head><body>
+<h1>Vault</h1><p>Your encrypted library, streamed from Discord.</p>
+<section id="login" class="panel"><label for="password">Vault password</label><input id="password" type="password" autocomplete="current-password" placeholder="Enter vault password"><button id="unlock">Unlock</button></section>
+<section id="app" class="hidden">
+<div class="panel"><button id="refresh">Refresh</button><button class="secondary" id="lock">Lock</button><label><input id="files" type="file" multiple></label><button id="upload">Upload selected files</button><div id="status"></div></div>
+<div id="library" class="panel"><h2>Library</h2><div id="items"></div></div>
+<div class="panel"><h2 id="playing">Player</h2><video id="video" controls playsinline></video></div>
+</section>
+<script>
+let token="";
+const $=id=>document.getElementById(id);
+function auth(url){return url+(url.includes("?")?"&":"?")+"t="+encodeURIComponent(token)}
+async function api(url,opts={}){const r=await fetch(url,opts);if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
+function say(s){$("status").textContent=s}
+async function load(){const items=await (await api(auth("/api/library?refresh=1"))).json();$("items").innerHTML="";
+for(const f of items){const row=document.createElement("div");row.className="item";const left=document.createElement("div");const name=document.createElement("strong");name.textContent=f.name;const meta=document.createElement("div");meta.innerHTML="<small>"+(f.ok?"Ready":"Incomplete")+" · "+(f.size/1048576).toFixed(1)+" MB</small>";left.append(name,meta);const play=document.createElement("button");play.textContent="Play";play.disabled=!f.ok;play.onclick=()=>{ $("playing").textContent=f.name;$("video").src=auth("/api/stream/"+encodeURIComponent(f.id));$("video").load();$("video").play().catch(()=>{});};row.append(left,play);$("items").append(row)}}
+$("unlock").onclick=async()=>{try{say("Unlocking…");const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();say("Vault unlocked.")}catch(e){say(e.message)}};
+$("refresh").onclick=()=>load().catch(e=>say(e.message));
+$("lock").onclick=async()=>{try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}token="";$("video").pause();$("video").removeAttribute("src");$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";say("Locked.")};
+$("upload").onclick=async()=>{const fs=[...$("files").files];if(!fs.length){say("Choose one or more files first.");return}
+try{for(let fi=0;fi<fs.length;fi++){const f=fs[fi];say("Uploading "+f.name+" ("+(fi+1)+"/"+fs.length+")…");const start=await (await api(auth("/api/upload/start"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:f.name,size:f.size,type:f.type})})).json();for(let i=0;i<start.n;i++){const chunk=f.slice(i*start.chunk,Math.min(f.size,(i+1)*start.chunk));const data=await chunk.arrayBuffer();await api(auth("/api/upload/chunk?id="+encodeURIComponent(start.id)+"&i="+i),{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:data});say("Uploading "+f.name+": "+Math.round((i+1)/start.n*100)+"%")}}$("files").value="";await load();say("Upload complete.")}catch(e){say(e.message)}};
+</script></body></html>
