@@ -397,61 +397,106 @@ def _library_snapshot():
                      "meta_mid": v.get("meta_mid"), "n": v["n"], "message_ids": list(v.get("message_ids", []))}
                 for k, v in SCAN_FOUND.items() if v.get("meta") or v.get("meta_mid") }
 
-def library():
-    found = _library_snapshot()
-    def one(kv):
-        fid, f = kv
-        with SCAN_LOCK:
+META_FILL_BUSY = False
+META_FAIL = {}
+LEGACY_CHECKED = set()
+
+def _fetch_meta(fid, f):
+    """Read one file's encrypted metadata from Discord (runs only in the background)."""
+    meta_url = f.get("meta")
+    if not meta_url and f.get("meta_mid"):
+        msg = V.dc("GET", f"/channels/{V.CH}/messages/{f['meta_mid']}").json()
+        attachments = msg.get("attachments") or []
+        meta_url = attachments[0].get("url") if attachments else None
+    if not meta_url:
+        return None
+    r = requests.get(meta_url, timeout=15)
+    r.raise_for_status()
+    m = json.loads(V.KEY["aes"].decrypt(r.content[:12], r.content[12:], None))
+    src = str(m.get("src") or "")
+    kind = m.get("kind") or ("instagram_reel" if "instagram.com/" in src and "/reel/" in src else "")
+    return {"id": fid, "name": m.get("name", "?"), "folder": m.get("folder") or "",
+            "kind": kind, "type": m.get("type") or "", "size": m.get("size", 0), "t": m.get("t", 0)}
+
+def _missing_meta(found):
+    now = time.time()
+    out = []
+    with SCAN_LOCK:
+        for fid, f in found.items():
             cached = META_CACHE.get(fid)
-        # Older entries marked as Reels may actually be ordinary uploaded files.
-        # Re-read their encrypted metadata once so legacy Instagram downloads can
-        # be identified by their saved source URL rather than by folder or size.
-        needs_legacy_check = bool(cached and str(cached.get("folder") or "").strip().lower() == "reels"
-                                 and not cached.get("kind"))
-        if cached is None or needs_legacy_check:
-            try:
-                meta_url = f.get("meta")
-                if not meta_url and f.get("meta_mid"):
-                    msg = V.dc("GET", f"/channels/{V.CH}/messages/{f['meta_mid']}").json()
-                    attachments = msg.get("attachments") or []
-                    meta_url = attachments[0].get("url") if attachments else None
-                if not meta_url:
-                    return None
-                r = requests.get(meta_url, timeout=15)
-                r.raise_for_status()
-                m = json.loads(V.KEY["aes"].decrypt(r.content[:12], r.content[12:], None))
-                src = str(m.get("src") or "")
-                kind = m.get("kind") or ("instagram_reel" if "instagram.com/" in src and "/reel/" in src else "")
-                cached = {"id": fid, "name": m.get("name", "?"), "folder": m.get("folder") or "",
-                          "kind": kind, "type": m.get("type") or "", "size": m.get("size", 0), "t": m.get("t", 0)}
-                with SCAN_LOCK:
-                    META_CACHE[fid] = cached
-            except Exception:
-                if cached is None:
-                    return None
-        item = dict(cached)
-        item["ok"] = len(f.get("chunks") or {}) == f["n"] or len(f.get("chunk_mids") or {}) == f["n"]
-        return item
+            legacy = bool(cached and str(cached.get("folder") or "").strip().lower() == "reels"
+                          and not cached.get("kind") and fid not in LEGACY_CHECKED)
+            if (cached is None or legacy) and now - META_FAIL.get(fid, 0) > 600:
+                out.append(fid)
+    return out
+
+def _meta_fill_worker():
+    """Fill the metadata cache in the background and save it to the database as it grows."""
+    global META_FILL_BUSY
+    try:
+        while V.KEY.get("aes") is not None:
+            found = _library_snapshot()
+            todo = _missing_meta(found)
+            if not todo:
+                break
+            batch = todo[:80]
+            def one(fid):
+                try:
+                    m = _fetch_meta(fid, found[fid])
+                    with SCAN_LOCK:
+                        LEGACY_CHECKED.add(fid)
+                        if m:
+                            META_CACHE[fid] = m
+                        else:
+                            META_FAIL[fid] = time.time()
+                except Exception:
+                    with SCAN_LOCK:
+                        META_FAIL[fid] = time.time()
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                list(ex.map(one, batch))
+            _save_library_cache()
+            print("library meta: filled batch=%s remaining~%s" % (len(batch), max(0, len(todo) - len(batch))), flush=True)
+    except Exception as e:
+        print("library meta fill failed: %s" % str(e)[:200], flush=True)
+    finally:
+        with SCAN_LOCK:
+            META_FILL_BUSY = False
+
+def start_meta_fill():
+    global META_FILL_BUSY
+    if V.KEY.get("aes") is None:
+        return
     with SCAN_LOCK:
-        meta_count_before = len(META_CACHE)
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        items = [x for x in ex.map(one, found.items()) if x]
-    # Persist metadata fetched during this library build so future unlocks
-    # can render the library without downloading the same metadata again.
+        if META_FILL_BUSY:
+            return
+        META_FILL_BUSY = True
+    threading.Thread(target=_meta_fill_worker, daemon=True).start()
+
+def library():
+    """Answer instantly from the cache; missing metadata is filled in the background."""
+    found = _library_snapshot()
+    items = []
     with SCAN_LOCK:
-        metadata_cache_changed = len(META_CACHE) > meta_count_before
-    if metadata_cache_changed:
-        _save_library_cache()
+        for fid, f in found.items():
+            cached = META_CACHE.get(fid)
+            if cached is None:
+                continue
+            item = dict(cached)
+            item["ok"] = len(f.get("chunks") or {}) == f["n"] or len(f.get("chunk_mids") or {}) == f["n"]
+            items.append(item)
+    pending = len(_missing_meta(found))
+    if pending:
+        start_meta_fill()
     items.sort(key=lambda x: x["t"], reverse=True)
     with _lock:
         LIB.update(t=time.time(), items=items)
         NAMES.clear()
         NAMES.update({x["id"]: x for x in items})
     with SCAN_LOCK:
-        scanning, error = (not SCAN_DONE) or SCAN_BUSY, SCAN_ERROR
+        scanning, error = (not SCAN_DONE) or SCAN_BUSY or META_FILL_BUSY or pending > 0, SCAN_ERROR
         cache_loaded = CACHE_LOADED
         indexed_files = len(SCAN_FOUND)
-    return {"items": items, "scanning": scanning, "error": error,
+    return {"items": items, "scanning": scanning, "error": error, "pending_meta": pending,
             "cache": {"durable": Q.DURABLE, "loaded": cache_loaded,
                       "indexed": indexed_files, "db_note": Q.ERROR}}
 
@@ -466,6 +511,8 @@ def end_session():
         SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR = {}, None, False, False, ""
         SCAN_NEWEST, CACHE_LOADED = None, False
         META_CACHE.clear()
+        META_FAIL.clear()
+        LEGACY_CHECKED.clear()
         GROUP_RECORDS.clear()
         ASSIGN_RECORDS.clear()
 
