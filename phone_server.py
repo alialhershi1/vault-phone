@@ -570,8 +570,16 @@ def library():
         item = dict(cached)
         item["ok"] = len(f.get("chunks") or {}) == f["n"] or len(f.get("chunk_mids") or {}) == f["n"]
         return item
+    with SCAN_LOCK:
+        meta_count_before = len(META_CACHE)
     with ThreadPoolExecutor(max_workers=8) as ex:
         items = [x for x in ex.map(one, found.items()) if x]
+    # Persist metadata fetched during this library build so future unlocks
+    # can render the library without downloading the same metadata again.
+    with SCAN_LOCK:
+        metadata_cache_changed = len(META_CACHE) > meta_count_before
+    if metadata_cache_changed:
+        _save_library_cache()
     items.sort(key=lambda x: x["t"], reverse=True)
     with _lock:
         LIB.update(t=time.time(), items=items)
