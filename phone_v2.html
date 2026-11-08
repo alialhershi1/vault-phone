@@ -562,15 +562,9 @@ async function refreshReelJobs(){
  }finally{reelJobRefreshBusy=false}
 }
 function extractInstagramReelLinks(raw){
- const text=String(raw||"").replace(/\u0026/gi,"&").replace(/&amp;/gi,"&");
- const found=[];
- const re=/(?:https?:\/\/)?(?:www\.|m\.)?instagram\.com\/(?:reel|reels)\/[A-Za-z0-9_-]+(?:\/)?(?:\?[^\s"'<>\]]*)?/gi;
- for(const match of text.matchAll(re)){
-  let url=match[0].replace(/[),.;]+$/,"");
-  if(!/^https?:\/\//i.test(url))url="https://"+url;
-  found.push(url);
- }
- return [...new Set(found)];
+ const text=String(raw||"").replace(/\\u0026/gi,"&").replace(/&amp;/gi,"&").replace(/\\\\\\//g,"/");
+ const re=/https?:\\/\\/(?:(?:www|m)\\.)?instagram\\.com\\/(?:reel|reels)\\/[A-Za-z0-9_-]+\\/?/gi;
+ return [...new Set([...text.matchAll(re)].map(m=>m[0].replace(/\\/$/,"")+"/"))];
 }
 $("downloadReels").onclick=async()=>{
  const raw=$("reelLinks").value;
