@@ -337,22 +337,24 @@ function renderReels(){
  const previousId=reelItems[reelActive]?.id||"";
  const nextItems=allItems.filter(isReel).sort((a,b)=>(b.t||0)-(a.t||0));
  const changed=nextItems.length!==reelItems.length||nextItems.some((x,i)=>x.id!==reelItems[i]?.id);
+ const appendOnly=nextItems.length>=reelItems.length&&reelItems.every((x,i)=>nextItems[i]?.id===x.id);
+ const rebuild=changed&&!appendOnly;
  reelItems=nextItems;
  $("reelCount").textContent=reelItems.length?" · "+reelItems.length:"";
  if(!reelItems.length){
   const checking=allItems.some(f=>f.ok&&isVideo(f)&&!reelDurationCache.has(f.id));
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
-  reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div>';
+  reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Finding videos shorter than 15 minutes in your server vault…</div>';
   $("reelStatus").textContent=checking?"Checking video lengths to find videos shorter than 15 minutes…":"No videos shorter than 15 minutes were found. Phone uploads are optional.";reelActive=-1;return;
  }
- if(changed){
+ if(rebuild){
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
   reelNodes.clear();$("reelFeed").innerHTML="";
   reelActive=previousId?reelItems.findIndex(x=>x.id===previousId):-1;
  }
  if(reelActive<0)reelActive=0;
  ensureReelWindow(reelActive);
- if(changed)activateReel(reelActive);
+ if(rebuild)activateReel(reelActive);
 }
 function nearestReel(){
  const feed=$("reelFeed"),slides=[...feed.querySelectorAll(".reel-slide")];if(!slides.length)return;
