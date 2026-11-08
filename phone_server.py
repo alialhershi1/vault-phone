@@ -1,7 +1,7 @@
 """Phone interface for the encrypted Discord vault. Runs behind Render's HTTPS proxy."""
-import datetime, ipaddress, json, mimetypes, os, secrets, socket, threading, time
+import datetime, ipaddress, json, mimetypes, os, re, secrets, socket, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import requests
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -26,6 +26,193 @@ FAILS = []
 UPLOADS = {}
 GROUP_RECORDS = {}
 ASSIGN_RECORDS = {}
+
+# Instagram Reel downloads run on the server; the browser sends URLs only.
+_REEL_JOBS = {}
+_REEL_JOB_LOCK = threading.RLock()
+_REEL_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_REEL_MAX_LINKS = 10
+_REEL_MAX_BYTES = 500 * 1024 * 1024
+
+def _reel_job_update(job_id, **values):
+    with _REEL_JOB_LOCK:
+        job = _REEL_JOBS.get(job_id)
+        if job:
+            job.update(values, updated=time.time())
+
+def _valid_instagram_reel_url(raw):
+    try:
+        parsed = urlparse(str(raw).strip())
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or host not in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
+            return None
+        if parsed.port not in (None, 443) or parsed.username or parsed.password:
+            return None
+        if not (parsed.path.startswith("/reel/") or parsed.path.startswith("/reels/")):
+            return None
+        return "https://www.instagram.com" + parsed.path.rstrip("/") + "/"
+    except Exception:
+        return None
+
+def _safe_reel_filename(title, extension):
+    base = os.path.basename(str(title or "Instagram Reel"))
+    base = re.sub(r'[\\\\/:*?"<>|\\x00-\\x1f]+', " ", base)
+    base = re.sub(r"\\s+", " ", base).strip(" .")[:130] or "Instagram Reel"
+    ext = re.sub(r"[^a-z0-9]", "", str(extension or "mp4").lower())[:8] or "mp4"
+    return base + "." + ext
+
+def _store_downloaded_reel(path, filename, job_id):
+    size = os.path.getsize(path)
+    if size <= 0 or size > _REEL_MAX_BYTES:
+        raise RuntimeError("The downloaded video is empty or exceeds the 500 MB limit.")
+    mime = mimetypes.guess_type(filename)[0] or "video/mp4"
+    fid = secrets.token_hex(6)
+    n = max(1, (size + V.CHUNK - 1) // V.CHUNK)
+    meta = {"name": filename, "folder": "Reels", "type": mime, "size": size,
+            "t": int(time.time() * 1000)}
+    created_ids = []
+    response = V.dc("POST", f"/channels/{V.CH}/messages",
+                    data={"content": f"v1 {fid} m {n}"},
+                    files={"files[0]": (f"m{fid}.bin", seal(json.dumps(meta).encode()))})
+    created_ids.append(response.json().get("id"))
+    with SCAN_LOCK:
+        SCAN_FOUND[fid] = {"meta": response.json()["attachments"][0]["url"],
+                           "chunks": {}, "n": n, "message_ids": list(created_ids)}
+        META_CACHE[fid] = {"id": fid, "name": filename, "folder": "Reels",
+                           "type": mime, "size": size, "t": meta["t"]}
+    try:
+        sent = 0
+        with open(path, "rb") as source:
+            for index in range(n):
+                chunk = source.read(V.CHUNK)
+                if not chunk:
+                    raise RuntimeError("The temporary video file ended unexpectedly.")
+                response = V.dc("POST", f"/channels/{V.CH}/messages",
+                                data={"content": f"v1 {fid} c{index} {n}"},
+                                files={"files[0]": (f"{fid}.{index}.bin", seal(chunk))})
+                message = response.json()
+                created_ids.append(message.get("id"))
+                with SCAN_LOCK:
+                    if fid in SCAN_FOUND:
+                        SCAN_FOUND[fid]["chunks"][index] = message["attachments"][0]["url"]
+                        SCAN_FOUND[fid]["message_ids"].append(message.get("id"))
+                sent += len(chunk)
+                _reel_job_update(job_id, status="storing", percent=80 + int(20 * sent / size),
+                                 message=f"Sending to Discord · {index + 1}/{n} parts")
+        with _lock:
+            LIB.update(t=0, items=[])
+        return fid
+    except Exception:
+        for message_id in created_ids:
+            if message_id:
+                try:
+                    V.dc("DELETE", f"/channels/{V.CH}/messages/{message_id}")
+                except Exception:
+                    pass
+        with SCAN_LOCK:
+            SCAN_FOUND.pop(fid, None)
+            META_CACHE.pop(fid, None)
+        raise
+
+def _run_reel_jobs(job_ids):
+    try:
+        import yt_dlp
+    except Exception as exc:
+        for job_id in job_ids:
+            _reel_job_update(job_id, status="failed", message="Server downloader is unavailable. Check the yt-dlp installation.")
+        return
+    for job_id in job_ids:
+        with _REEL_JOB_LOCK:
+            job = dict(_REEL_JOBS.get(job_id) or {})
+        if not job:
+            continue
+        temp_dir = tempfile.mkdtemp(prefix="vault-reel-")
+        try:
+            _reel_job_update(job_id, status="downloading", percent=0, message="Connecting to Instagram…")
+            def progress(data):
+                if data.get("status") == "downloading":
+                    total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+                    downloaded = data.get("downloaded_bytes") or 0
+                    percent = min(79, int(downloaded * 79 / total)) if total else 1
+                    _reel_job_update(job_id, percent=percent,
+                                     message="Downloading from Instagram · " + (str(data.get("_percent_str", "")).strip() or "working"))
+                elif data.get("status") == "finished":
+                    _reel_job_update(job_id, percent=79, message="Download complete · preparing Discord transfer…")
+            options = {
+                "format": "best[ext=mp4]/best",
+                "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+                "noplaylist": True, "quiet": True, "no_warnings": True,
+                "restrictfilenames": True, "socket_timeout": 30,
+                "retries": 2, "fragment_retries": 2, "extractor_retries": 2,
+                "max_filesize": _REEL_MAX_BYTES, "progress_hooks": [progress],
+            }
+            with yt_dlp.YoutubeDL(options) as downloader:
+                info = downloader.extract_info(job["url"], download=True)
+                if not info:
+                    raise RuntimeError("Instagram did not provide a downloadable video.")
+                filepath = downloader.prepare_filename(info)
+            if not os.path.isfile(filepath):
+                candidates = [os.path.join(temp_dir, name) for name in os.listdir(temp_dir)]
+                candidates = [p for p in candidates if os.path.isfile(p)]
+                if not candidates:
+                    raise RuntimeError("The downloaded video file was not found.")
+                filepath = candidates[0]
+            filename = _safe_reel_filename(info.get("title") or info.get("id"), os.path.splitext(filepath)[1].lstrip("."))
+            _reel_job_update(job_id, status="storing", percent=80, title=filename,
+                             message="Encrypting and sending video to Discord…")
+            fid = _store_downloaded_reel(filepath, filename, job_id)
+            _reel_job_update(job_id, status="completed", percent=100, file_id=fid,
+                             title=filename, message="Saved in your Discord Vault · Reels")
+        except Exception as exc:
+            message = str(exc).strip() or "Download failed."
+            if "private" in message.lower() or "login" in message.lower() or "sign in" in message.lower():
+                message = "This Reel is not publicly downloadable. Private/login-required links aren't supported."
+            _reel_job_update(job_id, status="failed", message=message[:240])
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+@app.post("/api/reels/download")
+def reels_download():
+    if not authed():
+        abort(403)
+    data = request.get_json(silent=True) or {}
+    raw_urls = data.get("urls") or []
+    if not isinstance(raw_urls, list):
+        return "Send a list of Instagram Reel URLs.", 400
+    urls = []
+    for raw in raw_urls:
+        url = _valid_instagram_reel_url(raw)
+        if not url:
+            return "Only public Instagram Reel links (instagram.com/reel/…) are accepted.", 400
+        if url not in urls:
+            urls.append(url)
+    if not urls:
+        return "Paste at least one Instagram Reel link.", 400
+    if len(urls) > _REEL_MAX_LINKS:
+        return f"Maximum {_REEL_MAX_LINKS} links per batch.", 400
+    job_ids = []
+    now = time.time()
+    with _REEL_JOB_LOCK:
+        active = sum(1 for item in _REEL_JOBS.values() if item.get("status") in {"queued", "downloading", "storing"})
+        if active + len(urls) > 20:
+            return "The download queue is full. Wait for some downloads to finish.", 429
+        for url in urls:
+            job_id = secrets.token_hex(8)
+            _REEL_JOBS[job_id] = {"id": job_id, "url": url, "status": "queued", "percent": 0,
+                                  "message": "Waiting in server queue…", "title": "Instagram Reel",
+                                  "created": now, "updated": now}
+            job_ids.append(job_id)
+    _REEL_EXECUTOR.submit(_run_reel_jobs, job_ids)
+    return jsonify(jobs=[_REEL_JOBS[job_id] for job_id in job_ids])
+
+@app.get("/api/reels/jobs")
+def reels_jobs():
+    if not authed():
+        abort(403)
+    with _REEL_JOB_LOCK:
+        jobs = sorted(_REEL_JOBS.values(), key=lambda item: item.get("created", 0), reverse=True)[:50]
+        return jsonify(jobs=jobs)
 
 def authed():
     tok = V.KEY["token"]
