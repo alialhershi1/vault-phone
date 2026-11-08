@@ -10,7 +10,6 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from flask import Flask, abort, jsonify, request, send_from_directory
 import vault_server as V
 import reel_queue as Q
-import imageio_ffmpeg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("PORT", "10000"))
@@ -204,9 +203,7 @@ def _process(job):
                 tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 pct = min(79, int((d.get("downloaded_bytes") or 0) * 79 / tot)) if tot else 1
                 Q.update(jid, percent=pct, message="Downloading from Instagram · " + (str(d.get("_percent_str", "")).strip() or "working"))
-        options = {"format": "bestvideo+bestaudio/best", "merge_output_format": "mp4",
-                   "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
-                   "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+        options = {"format": "best[ext=mp4]/best", "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
                    "noplaylist": True, "quiet": True, "no_warnings": True, "restrictfilenames": True,
                    "socket_timeout": 30, "retries": 2, "fragment_retries": 2, "extractor_retries": 1,
                    "max_filesize": _REEL_MAX_BYTES, "progress_hooks": [progress]}
