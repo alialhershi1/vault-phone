@@ -339,6 +339,7 @@ function renderReels(){
  const changed=nextItems.length!==reelItems.length||nextItems.some((x,i)=>x.id!==reelItems[i]?.id);
  const appendOnly=nextItems.length>=reelItems.length&&reelItems.every((x,i)=>nextItems[i]?.id===x.id);
  const rebuild=changed&&!appendOnly;
+ const needsActivation=reelActive<0&&nextItems.length>0;
  reelItems=nextItems;
  $("reelCount").textContent=reelItems.length?" · "+reelItems.length:"";
  if(!reelItems.length){
@@ -354,7 +355,7 @@ function renderReels(){
  }
  if(reelActive<0)reelActive=0;
  ensureReelWindow(reelActive);
- if(rebuild)activateReel(reelActive);
+ if(rebuild||needsActivation)activateReel(reelActive);
 }
 function nearestReel(){
  const feed=$("reelFeed"),slides=[...feed.querySelectorAll(".reel-slide")];if(!slides.length)return;
