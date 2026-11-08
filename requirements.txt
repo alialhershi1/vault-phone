@@ -3,3 +3,4 @@ requests>=2.31
 cryptography>=42
 yt-dlp>=2025.1.15
 psycopg[binary]>=3.2
+imageio-ffmpeg>=0.6.0
