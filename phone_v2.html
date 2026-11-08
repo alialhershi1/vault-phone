@@ -727,4 +727,42 @@ $("pdfScroll").addEventListener("wheel",e=>{if(e.ctrlKey||e.metaKey){e.preventDe
 let pinchDistance=0;$("pdfScroll").addEventListener("touchmove",e=>{if(e.touches.length===2){const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(pinchDistance&&Math.abs(d/pinchDistance-1)>.04)queuePdfZoom(pdfScale*d/pinchDistance);pinchDistance=d}},{passive:true});$("pdfScroll").addEventListener("touchend",()=>pinchDistance=0,{passive:true});
 $("audioPlay").onclick=audioPlay;$("audioPause").onclick=()=>speechSynthesis.pause();$("audioBack").onclick=()=>{audioStop();audioChunkIndex=Math.max(0,audioChunkIndex-1);audioPlay()};$("audioForward").onclick=()=>{audioStop();audioChunkIndex=Math.min(audioChunks.length-1,audioChunkIndex+1);audioPlay()};if(window.speechSynthesis){loadAudioVoices();speechSynthesis.onvoiceschanged=loadAudioVoices}
 
+
+<script>
+(function(){
+ const btn=document.getElementById("unlock"), pass=document.getElementById("password"), status=document.getElementById("loginStatus");
+ if(!btn||!pass||!status)return;
+ btn.onclick=async function(){
+  const password=pass.value;
+  if(!password){status.textContent="Enter the vault password.";pass.focus();return;}
+  btn.disabled=true;status.textContent="Connecting to the vault server…";
+  try{
+   const controller=new AbortController();
+   const timer=setTimeout(()=>controller.abort(),180000);
+   let response;
+   try{
+    response=await fetch("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({p:password}),cache:"no-store",signal:controller.signal});
+   } finally {clearTimeout(timer);}
+   const body=await response.text();
+   if(!response.ok)throw new Error(body||("Server returned HTTP "+response.status));
+   let data;
+   try{data=JSON.parse(body)}catch(_){throw new Error("Server returned an invalid unlock response. Please retry.");}
+   if(!data||!data.t)throw new Error("Server accepted the request but did not return a session token.");
+   token=data.t;
+   document.getElementById("login").classList.add("hidden");
+   document.getElementById("app").classList.remove("hidden");
+   status.textContent="";
+   if(typeof load==="function")await load();
+   if(typeof refreshReelJobs==="function")await refreshReelJobs();
+   if(typeof pollTimer!=="undefined"){
+    if(pollTimer)clearInterval(pollTimer);
+    pollTimer=setInterval(()=>{if(typeof load==="function")load()},3000);
+   }
+  }catch(err){
+   status.textContent=err&&err.name==="AbortError"?"The server took too long to respond. Check Render logs and try again.":("Unlock failed: "+(err&&err.message?err.message:String(err)));
+  }finally{btn.disabled=false;}
+ };
+ pass.onkeydown=function(e){if(e.key==="Enter"){e.preventDefault();btn.click();}};
+})();
+</script>
 </script></body></html>
