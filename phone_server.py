@@ -551,7 +551,14 @@ def library():
             cached = META_CACHE.get(fid)
         if cached is None:
             try:
-                r = requests.get(f["meta"], timeout=15)
+                meta_url = f.get("meta")
+                if not meta_url and f.get("meta_mid"):
+                    msg = V.dc("GET", f"/channels/{V.CH}/messages/{f['meta_mid']}").json()
+                    attachments = msg.get("attachments") or []
+                    meta_url = attachments[0].get("url") if attachments else None
+                if not meta_url:
+                    return None
+                r = requests.get(meta_url, timeout=15)
                 r.raise_for_status()
                 m = json.loads(V.KEY["aes"].decrypt(r.content[:12], r.content[12:], None))
                 cached = {"id": fid, "name": m.get("name", "?"), "folder": m.get("folder") or "",
