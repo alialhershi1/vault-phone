@@ -601,30 +601,11 @@ $("uploadReels").onclick=async()=>{
 };
 
 $("unlock").onclick=async()=>{
- const btn=$("unlock");btn.disabled=true;
- try{
-  if(!$("password").value){loginSay("Enter the vault password.");$("password").focus();return}
-  loginSay("Contacting vault server…");
-  const started=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});
-  const initial=await started.json();
-  if(!initial.job)throw new Error("Server did not create an unlock request.");
-  loginSay("Connected. Checking your encrypted Discord vault…");
-  let result=null;
-  for(let i=0;i<600;i++){
-   await new Promise(resolve=>setTimeout(resolve,1500));
-   const response=await api("/api/unlock/"+encodeURIComponent(initial.job),{cache:"no-store"});
-   result=await response.json();
-   if(result.state==="success")break;
-   if(result.state==="error")throw new Error(result.message||"Unlock failed.");
-   loginSay("Checking Discord vault… ("+Math.floor((i+1)*1.5)+"s)");
-  }
-  if(!result||result.state!=="success")throw new Error("Vault verification is taking too long. Check the Render app logs.");
-  token=result.t;
-  $("login").classList.add("hidden");$("app").classList.remove("hidden");loginSay("");
-  await load();await refreshReelJobs();
+ try{loginSay("Checking password…");$("unlock").disabled=true;
+  const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});
+  token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();await refreshReelJobs();
   if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),3000);
- }catch(e){loginSay(e.message||"Unlock failed.")}
- finally{btn.disabled=false}
+ }catch(e){loginSay(e.message)}finally{$("unlock").disabled=false}
 };
 $("password").addEventListener("keydown",e=>{if(e.key==="Enter")$("unlock").click()});
 $("refresh").onclick=()=>load();$("search").addEventListener("input",render);$("sizeFilter").addEventListener("change",render);
