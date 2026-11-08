@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from flask import Flask, abort, jsonify, request, send_from_directory
 import vault_server as V
-import reel_queue as Q
+import vault_leech as Leech
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("PORT", "10000"))
@@ -58,7 +58,7 @@ def read_token(tok):
 def _set_key(raw):
     if V.KEY.get("raw") != raw:
         V.KEY["aes"], V.KEY["raw"] = AESGCM(raw), raw
-        _persist_worker_key(raw)
+        _persist_leech_worker_key(raw)
     _WAKE.set()
 
 def authed():
@@ -69,55 +69,28 @@ def authed():
     return True
 V.AUTH_CHECK = authed
 
-# Reel downloads: a durable queue (reel_queue.py) drained by exactly 2 workers.
-_REEL_MAX_BYTES = 500 * 1024 * 1024
-_WAKE = threading.Event()
-_IG = {"cool": 0.0}
-_PERSISTED = {"raw": None}
-MAX_ATTEMPTS = 5
-BATCH_MAX = 1000
-_THROTTLE = ("empty media response", "rate-limit", "rate limit", "429", "too many requests", "not granting access")
-_PERMANENT = ("private", "login required", "unavailable", "removed", "does not exist", "not found", "404", "age-restricted", "exceeds the 500")
+# Vault Leech owns Instagram extraction, queueing and worker lifecycle.
+import vault_leech as Leech
 
-def _persist_worker_key(raw):
-    """Lets queued downloads resume after a restart without anyone unlocking.
-    Stored wrapped (needs this server's env secret). Disable: WORKER_KEY_PERSIST=0."""
-    if not Q.DURABLE or os.environ.get("WORKER_KEY_PERSIST", "1") == "0" or _PERSISTED["raw"] == raw:
+def _persist_leech_worker_key(raw):
+    if not Leech.Q.DURABLE or os.environ.get("WORKER_KEY_PERSIST", "1") == "0":
         return
     try:
-        Q.kv_set("worker_key", make_token(raw, 365 * 86400))
-        _PERSISTED["raw"] = raw
+        Leech.Q.kv_set("worker_key", make_token(raw, 365 * 86400))
     except Exception:
         pass
 
-def _load_worker_key():
-    if not Q.DURABLE or os.environ.get("WORKER_KEY_PERSIST", "1") == "0":
+def _load_leech_worker_key():
+    if V.KEY.get("aes"):
+        return
+    if not Leech.Q.DURABLE or os.environ.get("WORKER_KEY_PERSIST", "1") == "0":
         return
     try:
-        raw = read_token(Q.kv_get("worker_key") or "")
+        raw = read_token(Leech.Q.kv_get("worker_key") or "")
         if raw:
             V.KEY["aes"], V.KEY["raw"] = AESGCM(raw), raw
-            _PERSISTED["raw"] = raw
     except Exception:
         pass
-
-def _valid_instagram_reel_url(raw):
-    try:
-        parsed = urlparse(str(raw).strip())
-        host = (parsed.hostname or "").lower()
-        if parsed.scheme not in ("http", "https") or host not in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
-            return None
-        m = re.match(r"^/(?:[^/]+/)?(?:reel|reels)/([A-Za-z0-9_-]+)", parsed.path)
-        return "https://www.instagram.com/reel/" + m.group(1) + "/" if m else None
-    except Exception:
-        return None
-
-def _safe_reel_filename(title, extension):
-    base = os.path.basename(str(title or "Instagram Reel"))
-    base = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", base)
-    base = re.sub(r"\s+", " ", base).strip(" .")[:130] or "Instagram Reel"
-    ext = re.sub(r"[^a-z0-9]", "", str(extension or "mp4").lower())[:8] or "mp4"
-    return base + "." + ext
 
 def _store_downloaded_reel(path, filename, job_id, src_url):
     size = os.path.getsize(path)
@@ -143,7 +116,7 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
                 chunk_urls[index] = msg["attachments"][0]["url"]
                 chunk_mids[index] = msg.get("id")
                 sent += len(chunk)
-                Q.update(job_id, status="storing", percent=80 + int(18 * sent / size),
+                Leech.Q.update(job_id, status="storing", percent=80 + int(18 * sent / size),
                          message=f"Sending to Discord · {index + 1}/{n} parts")
         # Verify the last chunk is really retrievable before calling this a success.
         probe = requests.get(chunk_urls[n - 1], headers={"Range": "bytes=0-15"}, timeout=60)
@@ -171,180 +144,6 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
                     except Exception:
                         pass
 
-def _friendly(msg):
-    low = msg.lower()
-    if "exceeded the rate-limit" in low or "redirected to the login page" in low:
-        return "Instagram blocked anonymous access. Add an authenticated IG_COOKIES value in Render, then retry this job."
-    if "empty media response" in low or any(k in low for k in _THROTTLE[1:]):
-        return "Instagram temporarily rate-limited this request. It will retry after a cooldown."
-    if "private" in low or "login required" in low:
-        return "This Reel is not publicly downloadable."
-    return msg.replace("ERROR: ", "")[:200]
-
-def _handle_failure(job, exc):
-    raw = str(exc).strip() or "Download failed."
-    low = raw.lower()
-    auth_blocked = ("exceeded the rate-limit" in low or "redirected to the login page" in low) and not os.environ.get("IG_COOKIES", "").strip()
-    throttled = any(k in low for k in _THROTTLE) and not auth_blocked
-    permanent = auth_blocked or ((not throttled) and any(k in low for k in _PERMANENT))
-    attempts = int(job.get("attempts") or 1)
-    if throttled:
-        _IG["cool"] = time.time() + min(900, 90 * attempts)  # both workers back off
-    if not permanent and attempts < MAX_ATTEMPTS:
-        delay = min(1800, 30 * 2 ** (attempts - 1)) + random.uniform(0, 10)
-        Q.update(job["id"], status="queued", next_try=time.time() + delay, percent=0,
-                 message=f"Retry {attempts}/{MAX_ATTEMPTS - 1} in {int(delay)}s · {_friendly(raw)[:110]}")
-    else:
-        Q.update(job["id"], status="failed", message=_friendly(raw))
-
-def _process(job):
-    import shutil, yt_dlp
-    jid = job["id"]
-    if job.get("file_id"):  # already stored on an earlier attempt: never download twice
-        Q.update(jid, status="completed", percent=100, message="Saved in your Discord Vault · Reels")
-        return
-    temp_dir = tempfile.mkdtemp(prefix="vault-reel-")
-    last = [0.0]
-    try:
-        def progress(d):
-            now = time.time()
-            if d.get("status") == "downloading" and now - last[0] > 2:
-                last[0] = now
-                tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                pct = min(79, int((d.get("downloaded_bytes") or 0) * 79 / tot)) if tot else 1
-                Q.update(jid, percent=pct, message="Downloading from Instagram · " + (str(d.get("_percent_str", "")).strip() or "working"))
-        options = {"format": "best[ext=mp4]/best", "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
-                   "noplaylist": True, "quiet": True, "no_warnings": True, "restrictfilenames": True,
-                   "socket_timeout": 30, "retries": 2, "fragment_retries": 2, "extractor_retries": 1,
-                   "max_filesize": _REEL_MAX_BYTES, "progress_hooks": [progress]}
-        cookies = os.environ.get("IG_COOKIES", "").strip()
-        if cookies:
-            cf = os.path.join(temp_dir, "cookies.txt")
-            # Render may contain either a Netscape cookie export or a browser
-            # Cookie header (name=value; name2=value2). yt-dlp only accepts
-            # Netscape's seven-column tab-separated cookie-file format.
-            if "\\t" in cookies and ("# Netscape HTTP Cookie File" in cookies or
-                                      any(line.count("\\t") >= 6 for line in cookies.splitlines())):
-                cookie_text = cookies.rstrip() + "\\n"
-            else:
-                pairs = []
-                for part in cookies.replace("\\r", "").replace("\\n", ";").split(";"):
-                    part = part.strip()
-                    if not part or "=" not in part:
-                        continue
-                    name, value = part.split("=", 1)
-                    name, value = name.strip(), value.strip()
-                    if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
-                        continue
-                    if not value:
-                        continue
-                    pairs.append(".instagram.com\\tTRUE\\t/\\tTRUE\\t0\\t%s\\t%s" % (name, value))
-                if not pairs:
-                    raise RuntimeError("IG_COOKIES is not a valid browser Cookie header or Netscape cookie export.")
-                cookie_text = "# Netscape HTTP Cookie File\\n" + "\\n".join(pairs) + "\\n"
-            with open(cf, "w", encoding="utf-8") as fh:
-                fh.write(cookie_text)
-            options["cookiefile"] = cf
-        with yt_dlp.YoutubeDL(options) as dl:
-            info = dl.extract_info(job["url"], download=True)
-            if not info:
-                raise RuntimeError("Instagram did not provide a downloadable video.")
-            filepath = dl.prepare_filename(info)
-        if not os.path.isfile(filepath):
-            cands = [os.path.join(temp_dir, x) for x in os.listdir(temp_dir) if x != "cookies.txt"]
-            cands = [p for p in cands if os.path.isfile(p)]
-            if not cands:
-                raise RuntimeError("The downloaded video file was not found.")
-            filepath = cands[0]
-        filename = _safe_reel_filename(info.get("title") or info.get("id"), os.path.splitext(filepath)[1].lstrip("."))
-        Q.update(jid, status="storing", percent=80, title=filename, message="Encrypting and sending video to Discord…")
-        fid = _store_downloaded_reel(filepath, filename, jid, job["url"])
-        Q.update(jid, status="completed", percent=100, file_id=fid, title=filename, message="Saved in your Discord Vault · Reels")
-    except Exception as exc:
-        _handle_failure(job, exc)
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-def _worker_loop():
-    while True:
-        try:
-            if not V.KEY.get("aes"):
-                _load_worker_key()
-            if not V.KEY.get("aes") or time.time() < _IG["cool"]:
-                _WAKE.wait(8); _WAKE.clear(); continue
-            job = Q.claim()
-            if not job:
-                _WAKE.wait(8); _WAKE.clear(); continue
-            _process(job)
-            time.sleep(random.uniform(2, 5))  # be gentle with Instagram
-        except Exception as exc:
-            print("reel worker error:", exc, flush=True)
-            time.sleep(10)
-
-def _keepalive_loop():
-    base = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
-    while base:
-        time.sleep(600)
-        try:
-            if Q.summary()["active"] > 0:  # free web services sleep after 15 min without traffic
-                requests.get(base + "/health", timeout=20)
-        except Exception:
-            pass
-
-def _start_reel_workers():
-    Q.init()
-    for _ in range(2):  # concurrency stays at 2
-        threading.Thread(target=_worker_loop, daemon=True).start()
-    threading.Thread(target=_keepalive_loop, daemon=True).start()
-
-@app.post("/api/reels/download")
-def reels_download():
-    if not authed():
-        abort(403)
-    raw_urls = (request.get_json(silent=True) or {}).get("urls") or []
-    if not isinstance(raw_urls, list):
-        return "Send a list of Instagram Reel URLs.", 400
-    if len(raw_urls) > BATCH_MAX:
-        return f"Send at most {BATCH_MAX} links per request.", 413
-    good, seen, invalid, samples, in_batch_dups = [], set(), 0, [], 0
-    for raw in raw_urls:
-        url = _valid_instagram_reel_url(raw)
-        if not url:
-            invalid += 1
-            if len(samples) < 5:
-                samples.append(str(raw)[:80])
-        elif url in seen:
-            in_batch_dups += 1
-        else:
-            seen.add(url); good.append(url)
-    added = dup = requeued = 0
-    if good:
-        try:
-            added, dup, requeued = Q.add_many(good)
-        except Exception as exc:
-            return "Queue storage failed: " + str(exc)[:200], 503
-        _WAKE.set()
-    return jsonify(submitted=len(raw_urls), added=added, requeued=requeued, duplicates=dup + in_batch_dups,
-                   invalid=invalid, invalid_samples=samples, summary=Q.summary())
-
-@app.get("/api/reels/jobs")
-def reels_jobs():
-    if not authed():
-        abort(403)
-    try:
-        limit = min(200, max(1, int(request.args.get("limit", 50))))
-        offset = max(0, int(request.args.get("offset", 0)))
-        return jsonify(jobs=Q.listing(limit, offset, request.args.get("status")), summary=Q.summary())
-    except Exception as exc:
-        return "Queue read failed: " + str(exc)[:200], 503
-
-@app.post("/api/reels/retry_failed")
-def reels_retry_failed():
-    if not authed():
-        abort(403)
-    n = Q.retry_failed()
-    _WAKE.set()
-    return jsonify(requeued=n, summary=Q.summary())
 
 def _add_messages(msgs):
     global SCAN_FOUND
@@ -955,4 +754,4 @@ def upload_chunk():
         _save_library_cache()
     return "", 204
 
-_start_reel_workers()
+Leech.register(app, authed, _store_downloaded_reel, _load_leech_worker_key)
