@@ -289,7 +289,7 @@ $("libraryTab").onclick=()=>setVaultTab("library");
 $("reelsTab").onclick=()=>setVaultTab("reels");
 function makeReelNode(item,index){
  const slide=document.createElement("article");slide.className="reel-slide";slide.dataset.index=String(index);
- const video=document.createElement("video");video.playsInline=true;video.loop=true;video.muted=true;video.controls=false;video.preload="none";
+ const video=document.createElement("video");video.playsInline=true;video.loop=true;video.muted=false;video.defaultMuted=false;video.controls=false;video.preload="none";
  video.setAttribute("aria-label",item.name);
  video.addEventListener("click",()=>{if(video.paused)video.play().catch(()=>{});else video.pause()});
  video.addEventListener("waiting",()=>slide.classList.add("buffering"));
@@ -297,13 +297,20 @@ function makeReelNode(item,index){
  const overlay=document.createElement("div");overlay.className="reel-overlay";
  const name=document.createElement("div");name.className="reel-name";name.textContent=item.name;
  const actions=document.createElement("div");actions.className="reel-actions";
- const mute=document.createElement("button");mute.type="button";mute.textContent="🔇";mute.title="Unmute";mute.setAttribute("aria-label","Toggle sound");
- mute.onclick=()=>{video.muted=!video.muted;mute.textContent=video.muted?"🔇":"🔊";mute.title=video.muted?"Unmute":"Mute"};
  const play=document.createElement("button");play.type="button";play.textContent="Ⅱ";play.title="Pause";play.setAttribute("aria-label","Play or pause");
  play.onclick=()=>{if(video.paused){video.play().catch(()=>{});play.textContent="Ⅱ";play.title="Pause"}else{video.pause();play.textContent="▶";play.title="Play"}};
  video.addEventListener("play",()=>{play.textContent="Ⅱ";play.title="Pause"});
  video.addEventListener("pause",()=>{play.textContent="▶";play.title="Play"});
- actions.append(mute,play);overlay.append(name,actions);slide.append(video,overlay);
+ const fullscreen=document.createElement("button");fullscreen.type="button";fullscreen.textContent="⛶";fullscreen.title="Full screen";fullscreen.setAttribute("aria-label","Enter full screen");
+ fullscreen.onclick=async()=>{
+  try{
+   if(document.fullscreenElement){await document.exitFullscreen();return}
+   if(slide.requestFullscreen)await slide.requestFullscreen();
+   else if(video.webkitEnterFullscreen)video.webkitEnterFullscreen();
+   else {$("reelStatus").textContent="Full screen isn't supported by this browser."}
+  }catch(e){$("reelStatus").textContent="Couldn't enter full screen. Try rotating your phone."}
+ };
+ actions.append(fullscreen,play);overlay.append(name,actions);slide.append(video,overlay);
  return slide;
 }
 function ensureReelWindow(center){
@@ -328,7 +335,7 @@ function activateReel(index){
  reelActive=index;ensureReelWindow(index);
  for(const [i,node] of reelNodes){
   const v=node.querySelector("video");
-  if(i===index){v.muted=false;const mute=node.querySelector(".reel-actions button");mute.textContent="🔊";mute.title="Mute";v.play().catch(()=>{v.muted=true;mute.textContent="🔇";mute.title="Unmute"})}
+  if(i===index){v.muted=false;v.defaultMuted=false;v.play().catch(()=>{$("reelStatus").textContent="Tap the video to start playback with sound."})}
   else v.pause();
  }
  $("reelStatus").textContent=(index+1)+" of "+reelItems.length+" · Server vault";
