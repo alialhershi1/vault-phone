@@ -236,7 +236,7 @@ async function load(){
 let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0;
 const reelDurationCache=new Map();
 let reelDurationScanRunning=false;
-function isReel(f){return !!(f && f.ok && isVideo(f) && reelDurationCache.has(f.id) && reelDurationCache.get(f.id)>900)}
+function isReel(f){return !!(f && f.ok && isVideo(f) && reelDurationCache.has(f.id) && reelDurationCache.get(f.id)<900)}
 async function scanReelDurations(){
  if(reelDurationScanRunning)return;
  reelDurationScanRunning=true;
@@ -341,7 +341,7 @@ function renderReels(){
   const checking=allItems.some(f=>f.ok&&isVideo(f)&&!reelDurationCache.has(f.id));
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
   reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div>';
-  $("reelStatus").textContent=checking?"Checking video lengths to find videos longer than 15 minutes…":"No videos longer than 15 minutes were found. Phone uploads are optional.";reelActive=-1;return;
+  $("reelStatus").textContent=checking?"Checking video lengths to find videos shorter than 15 minutes…":"No videos shorter than 15 minutes were found. Phone uploads are optional.";reelActive=-1;return;
  }
  if(changed){
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
