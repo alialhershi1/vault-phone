@@ -517,8 +517,8 @@ def unlock():
         return "Incorrect vault password.", 401
     V.clear_stream_state()
     V.KEY["aes"], V.KEY["raw"] = aes, raw
-    _persist_worker_key(raw)
-    _WAKE.set()
+    _persist_leech_worker_key(raw)
+    Leech._WAKE.set()
     _save_library_cache()
     with _lock:
         LIB.update(t=0, items=[])
