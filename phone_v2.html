@@ -10,7 +10,10 @@ input[type=password],input[type=search]{width:100%;margin:9px 0}
 button{background:#2563eb;border:0;cursor:pointer;margin:4px 4px 4px 0}button:disabled{opacity:.45;cursor:not-allowed}
 button.secondary{background:#354252}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .item{padding:11px 3px;border-bottom:1px solid #303b49;display:flex;gap:12px;align-items:center;justify-content:space-between}
-.item:last-child{border-bottom:0}.item-name{min-width:0;overflow-wrap:anywhere}.item-actions{flex-shrink:0}
+.item:last-child{border-bottom:0}.item-name{min-width:0;overflow-wrap:anywhere}.item-actions{flex-shrink:0;display:flex;align-items:center;gap:4px}.item-actions button{padding:8px 9px}.delete-file{background:#3b3033;color:#f0c8c8}
+.library-search{display:flex;align-items:center;gap:7px}.library-search #search{flex:1;min-width:0}.library-search select{width:auto;max-width:116px;padding:8px 7px;font-size:11px;white-space:nowrap}
+.folder-tools{display:flex;gap:7px;align-items:center;margin:2px 0 10px}.folder-tools input{flex:1;min-width:0;padding:8px 10px;font-size:13px}.folder-tools button{font-size:12px;padding:8px 10px}
+@media(max-width:600px){.library-search select{max-width:105px;font-size:10px;padding:7px 5px}.item-actions button{padding:8px 7px;font-size:12px}}
 small,.muted{color:#9eabb9}.hidden{display:none!important}
 .yt-player{position:relative;background:#000;border-radius:12px;overflow:hidden;margin-top:12px;isolation:isolate}
 #video{display:block;width:100%;height:auto;max-height:68vh;background:#000;object-fit:contain;cursor:pointer}
@@ -20,11 +23,12 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 .yt-controls button:hover{background:#ffffff22}
 .yt-controls input[type=range]{accent-color:#f00;padding:0;margin:0}
 #seek{display:block;width:100%;height:6px;cursor:pointer;margin:0 0 10px;touch-action:pan-y}
-#volume{width:92px;accent-color:#f3f4f6}
-#volume::-webkit-slider-runnable-track{height:5px;border-radius:99px;background:linear-gradient(to right,#2688ff 0%,#2688ff 20%,#f4d35e 25%,#f59e0b 37.5%,#f8fafc 50%,#f8fafc 50.5%,#ef4444 100%)}
-#volume::-moz-range-track{height:5px;border-radius:99px;background:linear-gradient(to right,#2688ff 0%,#2688ff 20%,#f4d35e 25%,#f59e0b 37.5%,#f8fafc 50%,#f8fafc 50.5%,#ef4444 100%)}
-#volume::-webkit-slider-thumb{appearance:none;width:13px;height:13px;border-radius:50%;background:#f8fafc;margin-top:-4px;box-shadow:0 1px 5px #0008}
-#volume::-moz-range-thumb{width:13px;height:13px;border:0;border-radius:50%;background:#f8fafc;box-shadow:0 1px 5px #0008}
+#volume{width:92px;accent-color:#cbd5e1;appearance:none;background:transparent;border:0;padding:0;height:18px;cursor:pointer}
+#volume::-webkit-slider-runnable-track{height:4px;border-radius:99px;background:#566273}
+#volume::-moz-range-track{height:4px;border-radius:99px;background:#566273}
+#volume::-webkit-slider-thumb{appearance:none;width:12px;height:12px;border-radius:50%;background:#e2e8f0;margin-top:-4px;box-shadow:0 1px 3px #0008}
+#volume::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#e2e8f0;box-shadow:0 1px 3px #0008}
+#volume:focus-visible{outline:2px solid #94a3b8;outline-offset:4px;border-radius:8px}
 #volumeValue{font-size:11px;color:#e5e7eb;min-width:32px}
 .yt-player.controls-hidden .yt-controls{opacity:0;pointer-events:none;transform:translateY(8px)}
 .yt-controls{transition:opacity .24s ease,transform .24s ease}
@@ -115,7 +119,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <div id="reelStatus">Main feed: videos already stored in your server vault. Phone uploads are optional.</div>
 <div id="reelFeed"><div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div></div>
 </div>
-<div id="library" class="panel"><div class="player-head"><h2>Library</h2><small id="total"></small></div><input id="search" type="search" placeholder="Search files and folders"><div id="items"></div></div>
+<div id="library" class="panel"><div class="player-head"><h2>Library</h2><small id="total"></small></div><div class="library-search"><input id="search" type="search" placeholder="Search files and folders"><select id="sizeFilter" aria-label="Filter by file size"><option value="all">All sizes</option><option value="small">Under 500 MB</option><option value="medium">500 MB–2 GB</option><option value="large">2–5 GB</option><option value="huge">Over 5 GB</option></select></div><div class="folder-tools"><input id="newFolder" type="text" maxlength="60" placeholder="New folder name"><button id="createFolder" class="secondary" type="button">+ Folder</button></div><div id="items"></div></div>
 <div class="panel" id="playerPanel">
 <div class="player-head"><h2 id="playing">Player</h2><small id="queueLabel">No video selected</small></div>
 <div class="yt-player" id="player">
@@ -134,7 +138,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 </div>
 </section>
 <script>
-let token="",pollTimer=null,loading=false,allItems=[],playQueue=[],currentIndex=-1;
+let token="",pollTimer=null,loading=false,allItems=[],playQueue=[],currentIndex=-1,customGroups=[],fileGroups={};
 const $=id=>document.getElementById(id);
 function auth(url){return url+(url.includes("?")?"&":"?")+"t="+encodeURIComponent(token)}
 async function api(url,opts={}){const r=await fetch(url,opts);if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
@@ -200,10 +204,14 @@ function playAt(index){
 }
 function moveQueue(delta){const n=currentIndex+delta;if(n>=0&&n<playQueue.length)playAt(n)}
 function render(){
- const q=$("search").value.trim().toLowerCase();
- const filtered=allItems.filter(f=>(f.name+" "+folderName(f)).toLowerCase().includes(q));
+ const q=$("search").value.trim().toLowerCase(),sizeMode=$("sizeFilter")?.value||"all";
+ const filtered=allItems.filter(f=>{
+  const size=Number(f.size)||0;
+  const sizeOK=sizeMode==="all"||(sizeMode==="small"&&size<500*1048576)||(sizeMode==="medium"&&size>=500*1048576&&size<2*1073741824)||(sizeMode==="large"&&size>=2*1073741824&&size<=5*1073741824)||(sizeMode==="huge"&&size>5*1073741824);
+  return sizeOK&&(f.name+" "+folderName(f)).toLowerCase().includes(q);
+ });
  const groups=new Map();
- for(const f of filtered){const key=folderName(f);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(f)}
+ for(const f of filtered){const gid=fileGroups[f.id]||"",key=gid?(customGroups.find(g=>g.id===gid)?.name||"Folder"):folderName(f);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(f)}
  $("items").innerHTML="";$("total").textContent=filtered.length+" of "+allItems.length+" files";
  if(!filtered.length){$("items").innerHTML='<div class="empty">No matching files.</div>';return}
  for(const [folder,items] of groups){
@@ -217,7 +225,11 @@ function render(){
    const actions=document.createElement("div");actions.className="item-actions";
    const play=document.createElement("button");play.textContent="Play";play.disabled=!f.ok||!isVideo(f);play.title=isVideo(f)?"Play video":"Not a video file";play.onclick=()=>{playQueue=allItems.filter(x=>x.ok&&isVideo(x));const idx=playQueue.findIndex(x=>x.id===f.id);playAt(idx)};
    const download=document.createElement("button");download.className="secondary";download.textContent="Save";download.disabled=!f.ok;download.onclick=()=>{const a=document.createElement("a");a.href=auth("/api/stream/"+encodeURIComponent(f.id)+"?dl=1");a.download=f.name;document.body.append(a);a.click();a.remove()};
-   actions.append(play,download);row.append(left,actions);body.append(row)
+   const move=document.createElement("select");move.setAttribute("aria-label","Move "+f.name+" to folder");move.className="move-file";
+   for(const g of customGroups){const op=document.createElement("option");op.value=g.id;op.textContent=g.name;move.append(op)}
+   move.value=fileGroups[f.id]||"";move.onchange=async()=>{try{await api(auth("/api/groups/assign"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({file:f.id,group:move.value})});if(move.value)fileGroups[f.id]=move.value;else delete fileGroups[f.id];render()}catch(e){say("Could not move file: "+e.message)}};
+   const del=document.createElement("button");del.className="delete-file";del.textContent="Delete";del.title="Delete this file permanently";del.onclick=async()=>{if(!confirm('Permanently delete "'+f.name+'"?'))return;del.disabled=true;try{await api(auth("/api/files/"+encodeURIComponent(f.id)),{method:"DELETE"});allItems=allItems.filter(x=>x.id!==f.id);delete fileGroups[f.id];render();say("File deleted.")}catch(e){del.disabled=false;say("Delete failed: "+e.message)}};
+   actions.append(move,play,download,del);row.append(left,actions);body.append(row)
   }
   details.append(body);$("items").append(details)
  }
@@ -225,7 +237,9 @@ function render(){
 async function load(){
  if(loading)return;loading=true;
  try{
-  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);render();if(!$("reelsPanel").classList.contains("hidden")){renderReels();scanReelDurations();}
+  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);
+  try{const gd=await(await api(auth("/api/groups"))).json();customGroups=gd.groups||[];fileGroups=gd.assignments||{}}catch(e){}
+  render();if(!$("reelsPanel").classList.contains("hidden")){renderReels();scanReelDurations();}
   if(data.scanning){say("Loading the rest of your library in the background · "+allItems.length+" found so far.");}
   else{say("Vault ready · "+allItems.length+" files loaded.");if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
   if(data.error)say("Library scan paused: "+data.error+" · Refresh to retry.");
@@ -442,7 +456,8 @@ $("unlock").onclick=async()=>{
  }catch(e){loginSay(e.message)}finally{$("unlock").disabled=false}
 };
 $("password").addEventListener("keydown",e=>{if(e.key==="Enter")$("unlock").click()});
-$("refresh").onclick=()=>load();$("search").addEventListener("input",render);
+$("refresh").onclick=()=>load();$("search").addEventListener("input",render);$("sizeFilter").addEventListener("change",render);
+$("createFolder").onclick=async()=>{const name=$("newFolder").value.trim();if(!name)return say("Enter a folder name.");try{const g=await(await api(auth("/api/groups"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json();customGroups.push(g);$("newFolder").value="";render();say("Folder created and synced.")}catch(e){say("Could not create folder: "+e.message)}};
 $("previous").onclick=()=>moveQueue(-1);$("next").onclick=()=>moveQueue(1);
 const vid=$("video");
 let hideControlsTimer=null,singleTapTimer=null,lastTapAt=0,audioContext=null,gainNode=null;
