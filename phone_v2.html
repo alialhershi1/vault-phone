@@ -79,10 +79,10 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 .reel-overlay{position:absolute;inset:auto 0 0;padding:52px 16px 18px;background:linear-gradient(transparent,rgba(0,0,0,.82));display:flex;align-items:flex-end;justify-content:space-between;gap:12px;pointer-events:none}
 .reel-name{font-size:13px;overflow-wrap:anywhere;color:#fff;text-shadow:0 1px 4px #000}
 .reel-actions{display:flex;flex-direction:column;gap:8px;pointer-events:auto}
-.reel-actions button{border-radius:50%;width:42px;height:42px;padding:0;background:#ffffff22;border:1px solid #ffffff44;backdrop-filter:blur(12px);font-size:17px}
+.reel-actions button{border-radius:50%;width:42px;height:42px;padding:0;background:#ffffff22;border:1px solid #ffffff44;backdrop-filter:blur(12px);font-size:17px;transition:background .2s ease,transform .2s ease}.reel-actions button.speed-active{background:#2563eb;border-color:#93c5fd;transform:scale(1.06)}
 .reel-empty{height:100%;min-height:420px;display:grid;place-items:center;text-align:center;padding:25px;color:#aab4c0}
 .reel-loading{position:absolute;inset:0;display:grid;place-items:center;color:#aab4c0;font-size:13px;pointer-events:none}
-#reelFeed .reel-slide:fullscreen,#reelFeed .reel-slide:-webkit-full-screen{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;min-height:0;margin:0;padding:0;border:0;border-radius:0;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000;z-index:99999;scroll-snap-align:none}#reelFeed .reel-slide:fullscreen video,#reelFeed .reel-slide:-webkit-full-screen video{display:block;width:100%;height:100%;max-width:100vw;max-height:100dvh;object-fit:contain;background:#000}#reelFeed .reel-slide:fullscreen .reel-overlay,#reelFeed .reel-slide:-webkit-full-screen .reel-overlay{position:absolute;inset:auto 0 0;z-index:100000;pointer-events:none}#reelFeed .reel-slide:fullscreen .reel-actions,#reelFeed .reel-slide:-webkit-full-screen .reel-actions{pointer-events:auto}@media(max-width:600px){#reelFeed{height:calc(100dvh - 150px);min-height:360px;margin:0 -13px;border-radius:0}.reel-slide{min-height:360px}.reel-overlay{padding:48px 12px 18px}.reels-head{margin:0 0 6px;padding:0 2px}.reels-head h2{margin:0}.reels-upload input{display:none}#reelStatus{margin:4px 0 8px;min-height:16px}.tabbar{margin:8px 0}.tabbar button{padding:10px}}
+#reelFeed:fullscreen,#reelFeed:-webkit-full-screen{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;max-width:none;min-height:0;margin:0;padding:0;border:0;border-radius:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scroll-snap-type:y mandatory;scrollbar-width:none;background:#000;z-index:99999;touch-action:pan-y}#reelFeed:fullscreen::-webkit-scrollbar,#reelFeed:-webkit-full-screen::-webkit-scrollbar{display:none}#reelFeed:fullscreen .reel-slide,#reelFeed:-webkit-full-screen .reel-slide{display:flex;width:100%;height:100dvh;min-height:100dvh;flex:0 0 100%;scroll-snap-align:start;scroll-snap-stop:always;overflow:hidden}#reelFeed:fullscreen .reel-slide video,#reelFeed:-webkit-full-screen .reel-slide video{display:block;width:100%;height:100%;max-width:100vw;max-height:100dvh;object-fit:contain;background:#000}#reelFeed:fullscreen .reel-overlay,#reelFeed:-webkit-full-screen .reel-overlay{position:absolute;inset:auto 0 0;z-index:100000;pointer-events:none}#reelFeed:fullscreen .reel-actions,#reelFeed:-webkit-full-screen .reel-actions{pointer-events:auto}@media(max-width:600px){#reelFeed{height:calc(100dvh - 150px);min-height:360px;margin:0 -13px;border-radius:0}.reel-slide{min-height:360px}.reel-overlay{padding:48px 12px 18px}.reels-head{margin:0 0 6px;padding:0 2px}.reels-head h2{margin:0}.reels-upload input{display:none}#reelStatus{margin:4px 0 8px;min-height:16px}.tabbar{margin:8px 0}.tabbar button{padding:10px}}
 
 #status{white-space:pre-wrap;color:#93c5fd;margin-top:9px;min-height:1.3em}
 .group{border:1px solid #303b49;border-radius:10px;margin:9px 0;overflow:hidden}
@@ -233,7 +233,18 @@ async function load(){
 }
 
 /* Reels feed: one active video, three ahead, one behind. */
-let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0,reelFullscreenSlide=null;
+let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0,reelFullscreenSlide=null,reelSpeed2x=false;
+const reelSpeedFrames=new WeakMap();
+function animateReelSpeed(video,target){
+ const previous=reelSpeedFrames.get(video);if(previous)cancelAnimationFrame(previous);
+ const from=Number(video.playbackRate)||1,start=performance.now(),duration=240;
+ const tick=now=>{const p=Math.min(1,(now-start)/duration),eased=1-Math.pow(1-p,3);video.playbackRate=from+(target-from)*eased;if(p<1)reelSpeedFrames.set(video,requestAnimationFrame(tick));else reelSpeedFrames.delete(video)};
+ reelSpeedFrames.set(video,requestAnimationFrame(tick));
+}
+function setReelSpeed(enabled){
+ reelSpeed2x=!!enabled;
+ for(const node of reelNodes.values()){const video=node.querySelector("video"),button=node.querySelector(".reel-speed");if(button){button.textContent=reelSpeed2x?"2×":"1×";button.classList.toggle("speed-active",reelSpeed2x);button.title=reelSpeed2x?"Switch to normal speed":"Play at 2x speed"}animateReelSpeed(video,reelSpeed2x?2:1)}
+}
 const reelDurationCache=new Map();
 let reelDurationScanRunning=false;
 function isReel(f){const d=reelDurationCache.get(f?.id);return !!(f&&f.ok&&isVideo(f)&&Number.isFinite(d)&&d>0&&d<900)}
@@ -301,17 +312,20 @@ function makeReelNode(item,index){
  play.onclick=()=>{if(video.paused){video.play().catch(()=>{});play.textContent="Ⅱ";play.title="Pause"}else{video.pause();play.textContent="▶";play.title="Play"}};
  video.addEventListener("play",()=>{play.textContent="Ⅱ";play.title="Pause"});
  video.addEventListener("pause",()=>{play.textContent="▶";play.title="Play"});
+ const speed=document.createElement("button");speed.className="reel-speed";speed.type="button";speed.textContent=reelSpeed2x?"2×":"1×";speed.title=reelSpeed2x?"Switch to normal speed":"Play at 2x speed";speed.setAttribute("aria-label","Toggle 2x playback speed");speed.classList.toggle("speed-active",reelSpeed2x);speed.onclick=(event)=>{event.preventDefault();event.stopPropagation();setReelSpeed(!reelSpeed2x)};
  const fullscreen=document.createElement("button");fullscreen.type="button";fullscreen.textContent="⛶";fullscreen.title="Full screen";fullscreen.setAttribute("aria-label","Enter full screen");
  fullscreen.onclick=async(event)=>{
   event.preventDefault();event.stopPropagation();
   try{
    if(document.fullscreenElement||document.webkitFullscreenElement){if(document.exitFullscreen)await document.exitFullscreen();else if(document.webkitExitFullscreen)document.webkitExitFullscreen();return}
    activateReel(Number(slide.dataset.index));
-   if(slide.requestFullscreen)await slide.requestFullscreen();
-   else {$("reelStatus").textContent="Full screen isn't supported by this browser."}
+   const feed=$("reelFeed");
+   if(feed.requestFullscreen)await feed.requestFullscreen();
+   else if(feed.webkitRequestFullscreen)feed.webkitRequestFullscreen();
+   else {$("reelStatus").textContent="Fullscreen is not supported by this browser."}
   }catch(e){$("reelStatus").textContent="Couldn't enter full screen. Try your browser's full-screen option."}
  };
- actions.append(fullscreen,play);overlay.append(name,actions);slide.append(video,overlay);
+ actions.append(fullscreen,speed,play);overlay.append(name,actions);slide.append(video,overlay);
  return slide;
 }
 function ensureReelWindow(center){
@@ -333,12 +347,12 @@ function ensureReelWindow(center){
 }
 function activateReel(index){
  if(index<0||index>=reelItems.length)return;
- if(reelFullscreenSlide&&index!==reelActive)return;
  reelActive=index;ensureReelWindow(index);
  for(const [i,node] of reelNodes){
   const v=node.querySelector("video");
   if(i===index){
    v.muted=false;v.defaultMuted=false;
+   animateReelSpeed(v,reelSpeed2x?2:1);
    if(v.paused)v.play().catch(()=>{$("reelStatus").textContent="Tap the video to start playback with sound."});
   }else{v.pause();v.muted=true;v.defaultMuted=true}
  }
@@ -347,14 +361,13 @@ function activateReel(index){
 function syncReelFullscreen(){
  const active=document.fullscreenElement||document.webkitFullscreenElement;
  const feed=$("reelFeed");
- if(active&&active.classList&&active.classList.contains("reel-slide")){
-  reelFullscreenSlide=active;
-  const index=Number(active.dataset.index);
-  if(Number.isInteger(index))reelActive=index;
-  feed.style.overflowY="hidden";
+ if(active===feed){
+  reelFullscreenSlide=feed;
+  const current=reelNodes.get(reelActive);
+  if(current)current.scrollIntoView({block:"start",behavior:"instant"});
   for(const [i,node] of reelNodes){
    const v=node.querySelector("video");
-   if(node===active){v.muted=false;v.defaultMuted=false;if(v.paused)v.play().catch(()=>{})}
+   if(i===reelActive){v.muted=false;v.defaultMuted=false;animateReelSpeed(v,reelSpeed2x?2:1);if(v.paused)v.play().catch(()=>{})}
    else{v.pause();v.muted=true;v.defaultMuted=true}
   }
  }else if(reelFullscreenSlide){
@@ -398,7 +411,6 @@ function nearestReel(){
  const idx=Number(best.dataset.index);if(Number.isInteger(idx)&&idx!==reelActive)activateReel(idx);
 }
 $("reelFeed").addEventListener("scroll",()=>{
- if(reelFullscreenSlide||document.fullscreenElement||document.webkitFullscreenElement)return;
  if(reelScrollTick)return;
  reelScrollTick=requestAnimationFrame(()=>{reelScrollTick=0;nearestReel()});
 },{passive:true});
