@@ -108,12 +108,12 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 </div><div id="status"></div>
 </div>
 <div id="reelsPanel" class="panel hidden">
-<div class="reels-head"><div><h2>Reels</h2><small class="muted">Swipe vertically · one at a time</small></div><div class="reels-upload">
+<div class="reels-head"><div><h2>Reels</h2><small class="muted">Server vault · swipe vertically</small></div><div class="reels-upload">
 <input id="reelFiles" type="file" accept="video/*,.mp4,.m4v,.webm,.mov,.ogv" multiple aria-label="Choose reels">
-<button id="uploadReels" type="button">Add reels</button>
+<button id="uploadReels" type="button">Add from phone</button>
 </div></div>
-<div id="reelStatus">Videos uploaded here are stored in your encrypted Reels folder.</div>
-<div id="reelFeed"><div class="reel-empty">Your Reels folder is empty.<br>Choose videos above to add your first reels.</div></div>
+<div id="reelStatus">Main feed: videos already stored in your server vault. Phone uploads are optional.</div>
+<div id="reelFeed"><div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div></div>
 </div>
 <div id="library" class="panel"><div class="player-head"><h2>Library</h2><small id="total"></small></div><input id="search" type="search" placeholder="Search files and folders"><div id="items"></div></div>
 <div class="panel" id="playerPanel">
@@ -234,7 +234,7 @@ async function load(){
 
 /* Reels feed: one active video, three ahead, one behind. */
 let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0;
-function isReel(f){return (f.folder||"").replace(/^\/+|\/+$/g,"")==="Reels" && f.ok && isVideo(f)}
+function isReel(f){return !!(f && f.ok && isVideo(f))}
 function setVaultTab(tab){
  const reels=tab==="reels";
  $("library").classList.toggle("hidden",reels);
@@ -291,7 +291,7 @@ function activateReel(index){
   if(i===index){v.muted=false;const mute=node.querySelector(".reel-actions button");mute.textContent="🔊";mute.title="Mute";v.play().catch(()=>{v.muted=true;mute.textContent="🔇";mute.title="Unmute"})}
   else v.pause();
  }
- $("reelStatus").textContent=(index+1)+" of "+reelItems.length+" · Reels";
+ $("reelStatus").textContent=(index+1)+" of "+reelItems.length+" · Server vault";
 }
 function renderReels(){
  const previousId=reelItems[reelActive]?.id||"";
@@ -301,8 +301,8 @@ function renderReels(){
  $("reelCount").textContent=reelItems.length?" · "+reelItems.length:"";
  if(!reelItems.length){
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
-  reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Your Reels folder is empty.<br>Choose videos above to add your first reels.</div>';
-  $("reelStatus").textContent="Videos uploaded here are stored in your encrypted Reels folder.";reelActive=-1;return;
+  reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div>';
+  $("reelStatus").textContent="Main feed: videos already stored in your server vault. Phone uploads are optional.";reelActive=-1;return;
  }
  if(changed){
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
@@ -338,7 +338,7 @@ $("uploadReels").onclick=async()=>{
     $("reelStatus").textContent="Uploading "+f.name+" · "+Math.round((i+1)/start.n*100)+"% ("+(fi+1)+"/"+fs.length+")";
    }
   }
-  $("reelFiles").value="";await load();setVaultTab("reels");renderReels();$("reelStatus").textContent="Added "+fs.length+" video"+(fs.length===1?"":"s")+" to Reels.";
+  $("reelFiles").value="";await load();setVaultTab("reels");renderReels();$("reelStatus").textContent="Uploaded "+fs.length+" video"+(fs.length===1?"":"s")+" from your phone to the server vault.";
  }catch(e){$("reelStatus").textContent="Upload stopped: "+e.message}
  finally{$("uploadReels").disabled=false}
 };
