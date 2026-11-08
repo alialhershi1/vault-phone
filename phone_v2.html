@@ -72,9 +72,9 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 .reels-upload{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .reels-upload input{max-width:100%;font-size:12px}
 #reelStatus{font-size:12px;color:#9eabb9;min-height:18px;margin:8px 0}
-#reelFeed{height:min(76dvh,850px);min-height:420px;overflow-y:auto;overscroll-behavior:contain;scroll-snap-type:y mandatory;border-radius:15px;background:#050608;scrollbar-width:none}
+#reelFeed{height:min(78dvh,900px);min-height:360px;overflow-y:auto;overscroll-behavior:contain;scroll-snap-type:y mandatory;border-radius:15px;background:#050608;scrollbar-width:none}
 #reelFeed::-webkit-scrollbar{display:none}
-.reel-slide{height:100%;min-height:420px;position:relative;display:flex;align-items:center;justify-content:center;scroll-snap-align:start;scroll-snap-stop:always;background:#050608;overflow:hidden}
+.reel-slide{height:100%;min-height:360px;position:relative;display:flex;align-items:center;justify-content:center;scroll-snap-align:start;scroll-snap-stop:always;background:#050608;overflow:hidden}
 .reel-slide video{width:100%;height:100%;object-fit:contain;background:#050608}
 .reel-overlay{position:absolute;inset:auto 0 0;padding:52px 16px 18px;background:linear-gradient(transparent,rgba(0,0,0,.82));display:flex;align-items:flex-end;justify-content:space-between;gap:12px;pointer-events:none}
 .reel-name{font-size:13px;overflow-wrap:anywhere;color:#fff;text-shadow:0 1px 4px #000}
@@ -82,7 +82,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 .reel-actions button{border-radius:50%;width:42px;height:42px;padding:0;background:#ffffff22;border:1px solid #ffffff44;backdrop-filter:blur(12px);font-size:17px}
 .reel-empty{height:100%;min-height:420px;display:grid;place-items:center;text-align:center;padding:25px;color:#aab4c0}
 .reel-loading{position:absolute;inset:0;display:grid;place-items:center;color:#aab4c0;font-size:13px;pointer-events:none}
-@media(max-width:600px){#reelFeed{height:calc(100dvh - 235px);min-height:420px;margin-inline:-2px}.reel-slide{min-height:420px}.reel-overlay{padding:48px 12px 14px}}
+@media(max-width:600px){#reelFeed{height:calc(100dvh - 150px);min-height:360px;margin:0 -13px;border-radius:0}.reel-slide{min-height:360px}.reel-overlay{padding:48px 12px 18px}.reels-head{margin:0 0 6px;padding:0 2px}.reels-head h2{margin:0}.reels-upload input{display:none}#reelStatus{margin:4px 0 8px;min-height:16px}.tabbar{margin:8px 0}.tabbar button{padding:10px}}
 
 #status{white-space:pre-wrap;color:#93c5fd;margin-top:9px;min-height:1.3em}
 .group{border:1px solid #303b49;border-radius:10px;margin:9px 0;overflow:hidden}
@@ -99,7 +99,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <button id="libraryTab" class="active" type="button" role="tab" aria-selected="true">Library</button>
 <button id="reelsTab" type="button" role="tab" aria-selected="false">Reels <span id="reelCount"></span></button>
 </div>
-<div class="panel">
+<div class="panel" id="libraryTools">
 <div class="toolbar"><button id="refresh">Refresh library</button><button class="secondary" id="lock">Lock vault</button></div>
 <div class="toolbar" style="margin-top:10px">
 <label class="muted">Files <input id="files" type="file" multiple></label>
@@ -225,7 +225,7 @@ function render(){
 async function load(){
  if(loading)return;loading=true;
  try{
-  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);render();if(!$("reelsPanel").classList.contains("hidden"))renderReels();scanReelDurations();
+  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);render();if(!$("reelsPanel").classList.contains("hidden")){renderReels();scanReelDurations();}
   if(data.scanning){say("Loading the rest of your library in the background · "+allItems.length+" found so far.");}
   else{say("Vault ready · "+allItems.length+" files loaded.");if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
   if(data.error)say("Library scan paused: "+data.error+" · Refresh to retry.");
@@ -236,7 +236,7 @@ async function load(){
 let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0;
 const reelDurationCache=new Map();
 let reelDurationScanRunning=false;
-function isReel(f){return !!(f && f.ok && isVideo(f) && reelDurationCache.has(f.id) && reelDurationCache.get(f.id)<900)}
+function isReel(f){const d=reelDurationCache.get(f?.id);return !!(f&&f.ok&&isVideo(f)&&Number.isFinite(d)&&d>0&&d<900)}
 async function scanReelDurations(){
  if(reelDurationScanRunning)return;
  reelDurationScanRunning=true;
@@ -252,13 +252,13 @@ async function scanReelDurations(){
      const duration=await new Promise(resolve=>{
       let settled=false;
       const finish=value=>{if(settled)return;settled=true;clearTimeout(timer);resolve(value)};
-      const timer=setTimeout(()=>finish(null),25000);
+      const timer=setTimeout(()=>finish(null),12000);
       v.addEventListener("loadedmetadata",()=>finish(Number.isFinite(v.duration)?v.duration:null),{once:true});
       v.addEventListener("error",()=>finish(null),{once:true});
       v.load();
      });
-     if(duration!==null)reelDurationCache.set(f.id,duration);
-     else reelDurationCache.set(f.id,0);
+     reelDurationCache.set(f.id,duration!==null&&duration>0?duration:Infinity);
+     if(!$("reelsPanel").classList.contains("hidden"))renderReels();
     }finally{
      v.pause();v.removeAttribute("src");v.load();
      checked++;
@@ -266,7 +266,7 @@ async function scanReelDurations(){
     }
    }
   }
-  await Promise.all([worker(),worker()]);
+  await worker();
  }finally{
   reelDurationScanRunning=false;
   renderReels();
@@ -275,6 +275,7 @@ async function scanReelDurations(){
 }
 function setVaultTab(tab){
  const reels=tab==="reels";
+ $("libraryTools").classList.toggle("hidden",reels);
  $("library").classList.toggle("hidden",reels);
  $("playerPanel").classList.toggle("hidden",reels);
  $("reelsPanel").classList.toggle("hidden",!reels);
@@ -282,7 +283,7 @@ function setVaultTab(tab){
  $("reelsTab").classList.toggle("active",reels);
  $("libraryTab").setAttribute("aria-selected",String(!reels));
  $("reelsTab").setAttribute("aria-selected",String(reels));
- if(reels){renderReels();if(reelActive<0&&reelItems.length)activateReel(0)}
+ if(reels){renderReels();scanReelDurations();if(reelActive<0&&reelItems.length)activateReel(0)}
 }
 $("libraryTab").onclick=()=>setVaultTab("library");
 $("reelsTab").onclick=()=>setVaultTab("reels");
@@ -306,7 +307,7 @@ function makeReelNode(item,index){
  return slide;
 }
 function ensureReelWindow(center){
- const feed=$("reelFeed"),lo=Math.max(0,center-1),hi=Math.min(reelItems.length-1,center+3);
+ const feed=$("reelFeed"),lo=Math.max(0,center-1),hi=Math.min(reelItems.length-1,center+2);
  for(let i=lo;i<=hi;i++){
   if(!reelNodes.has(i)){
    const node=makeReelNode(reelItems[i],i);reelNodes.set(i,node);
@@ -314,8 +315,9 @@ function ensureReelWindow(center){
    if(next!==undefined)feed.insertBefore(node,reelNodes.get(next));else feed.append(node);
   }
   const v=reelNodes.get(i).querySelector("video");
-  if(!v.src){v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}
-  v.preload=i===center?"auto":(i>center?"auto":"metadata");
+  if(i===center&&!v.src){v.preload="auto";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}
+  else if(i===center+1&&!v.src){v.preload="metadata";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}
+  else if(i!==center&&i!==center+1){v.preload="none";if(v.src){v.removeAttribute("src");v.load()}}
  }
  for(const [i,node] of [...reelNodes.entries()]){
   if(i<lo||i>hi){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load();node.remove();reelNodes.delete(i)}
@@ -364,6 +366,7 @@ $("reelFeed").addEventListener("scroll",()=>{
  reelScrollTick=requestAnimationFrame(()=>{reelScrollTick=0;nearestReel()});
 },{passive:true});
 $("uploadReels").onclick=async()=>{
+ if(!$("reelFiles").files.length){$("reelFiles").click();return}
  const fs=[...$("reelFiles").files].filter(f=>f.type.startsWith("video/")||/\.(mp4|m4v|webm|mov|ogv)$/i.test(f.name));
  if(!fs.length){$("reelStatus").textContent="Choose one or more video files first.";return}
  $("uploadReels").disabled=true;
