@@ -321,7 +321,7 @@ function setReelSpeed(enabled){
 }
 const reelDurationCache=new Map();
 const REEL_BATCH_SIZE=12;
-let reelDurationScanRunning=false,reelCandidateList=[],reelCandidateCursor=0,reelCandidateKey="",reelShuffle=false;
+let reelDurationScanRunning=false,reelCandidateList=[],reelCandidateCursor=0,reelCandidateKey="",reelShuffle=false,reelLoadTarget=12;
 function isReel(f){const d=reelDurationCache.get(f?.id);return !!(f&&f.ok&&isVideo(f)&&Number.isFinite(d)&&d>0&&d<900)}
 function shuffleList(list){
  const out=[...list];
@@ -332,8 +332,12 @@ function prepareReelCandidates(){
  const base=allItems.filter(f=>f.ok&&isVideo(f)).sort((a,b)=>(b.t||0)-(a.t||0));
  const key=base.map(f=>f.id).join("|");
  if(key!==reelCandidateKey){
+  const priorIds=new Set(reelCandidateList.map(f=>f.id));
+  const present=new Set(base.map(f=>f.id));
   reelCandidateKey=key;
-  reelCandidateList=reelShuffle?shuffleList(base):base;
+  if(reelShuffle&&reelCandidateList.length){
+   reelCandidateList=reelCandidateList.filter(f=>present.has(f.id)).concat(shuffleList(base.filter(f=>!priorIds.has(f.id))));
+  }else reelCandidateList=reelShuffle?shuffleList(base):base;
   reelCandidateCursor=0;
   while(reelCandidateCursor<reelCandidateList.length&&reelDurationCache.has(reelCandidateList[reelCandidateCursor].id))reelCandidateCursor++;
  }
@@ -376,7 +380,7 @@ async function scanReelDurations(initial=false){
   renderReels();
   if($("reelsPanel")&&!$("reelsPanel").classList.contains("hidden")){
    if(reelActive<0&&reelItems.length)activateReel(0);
-   if(!reelItems.length&&reelCandidateCursor<reelCandidateList.length)scanReelDurations(true);
+   if(reelItems.length<reelLoadTarget&&reelCandidateCursor<reelCandidateList.length)scanReelDurations(true);
   }
  }
 }
@@ -513,14 +517,15 @@ $("reelFeed").addEventListener("scroll",()=>{
  if(reelScrollTick)return;
  reelScrollTick=requestAnimationFrame(()=>{
   reelScrollTick=0;nearestReel();
-  if(reelItems.length-reelActive<=3&&reelCandidateCursor<reelCandidateList.length)scanReelDurations();
+  if(reelItems.length-reelActive<=3&&reelCandidateCursor<reelCandidateList.length){reelLoadTarget=Math.max(reelLoadTarget,reelItems.length+12);scanReelDurations(true)}
  });
 },{passive:true});
 $("shuffleReels").onclick=()=>{
  reelShuffle=!reelShuffle;
  $("shuffleReels").textContent=reelShuffle?"Shuffle: On":"Shuffle";
  $("shuffleReels").classList.toggle("speed-active",reelShuffle);
- reelCandidateKey="";
+ for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
+ reelCandidateList=[];reelCandidateKey="";reelCandidateCursor=0;reelLoadTarget=12;
  prepareReelCandidates();
  reelNodes.clear();$("reelFeed").innerHTML="";
  reelActive=-1;reelItems=[];
