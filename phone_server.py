@@ -261,7 +261,7 @@ def get_groups():
             try:
                 raw = requests.get(url, timeout=15).content
                 data = json.loads(V.KEY["aes"].decrypt(raw[:12], raw[12:], None))
-                assignments[fid] = data.get("group", gid)
+                assignments[fid] = data.get("group", "")
             except Exception:
                 assignments[fid] = gid
     return jsonify(groups=groups, assignments=assignments)
@@ -286,11 +286,9 @@ def assign_group():
     fid, gid = str(d.get("file", "")), str(d.get("group", ""))
     if fid not in NAMES or (gid and gid not in GROUP_RECORDS):
         return "File or folder not found.", 404
-    if not gid:
-        ASSIGN_RECORDS.pop(fid, None)
-        return "", 204
-    msg = _post_encrypted_record(f"v1a {fid} {gid}", {"group": gid}, f"a{fid}.bin")
-    ASSIGN_RECORDS.setdefault(fid, []).insert(0, (gid, msg["attachments"][0]["url"]))
+    stored_gid = gid or "none"
+    msg = _post_encrypted_record(f"v1a {fid} {stored_gid}", {"group": gid}, f"a{fid}.bin")
+    ASSIGN_RECORDS.setdefault(fid, []).insert(0, (stored_gid, msg["attachments"][0]["url"]))
     return "", 204
 
 @app.delete("/api/files/<fid>")
