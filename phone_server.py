@@ -1,5 +1,5 @@
 """Phone interface for the encrypted Discord vault. Runs behind Render's HTTPS proxy."""
-import base64, datetime, ipaddress, json, random, mimetypes, os, re, secrets, socket, tempfile, threading, time
+import base64, datetime, ipaddress, json, random, mimetypes, os, re, secrets, socket, tempfile, threading, time, zlib
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, urlparse
 import requests
@@ -24,6 +24,10 @@ SCAN_BEFORE = None
 SCAN_DONE = False
 SCAN_BUSY = False
 SCAN_ERROR = ""
+SCAN_NEWEST = None
+SCAN_MODE = "initial"
+CACHE_LOADED = False
+LAST_INCREMENTAL_SCAN = 0.0
 FAILS = []
 UPLOADS = {}
 GROUP_RECORDS = {}
@@ -127,7 +131,7 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
     created_ids, last_url, ok = [], None, False
     try:
         # Chunks first, meta LAST: the library only lists an entry once it is complete.
-        sent, chunk_urls = 0, {}
+        sent, chunk_urls, chunk_mids = 0, {}, {}
         with open(path, "rb") as source:
             for index in range(n):
                 chunk = source.read(V.CHUNK)
@@ -137,6 +141,7 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
                            files={"files[0]": (f"{fid}.{index}.bin", seal(chunk))}).json()
                 created_ids.append(msg.get("id"))
                 chunk_urls[index] = msg["attachments"][0]["url"]
+                chunk_mids[index] = msg.get("id")
                 sent += len(chunk)
                 Q.update(job_id, status="storing", percent=80 + int(18 * sent / size),
                          message=f"Sending to Discord · {index + 1}/{n} parts")
@@ -149,10 +154,12 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
         created_ids.append(msg.get("id"))
         with SCAN_LOCK:
             SCAN_FOUND[fid] = {"meta": msg["attachments"][0]["url"], "chunks": chunk_urls, "n": n,
+                               "meta_mid": msg.get("id"), "chunk_mids": chunk_mids,
                                "message_ids": list(created_ids)}
             META_CACHE[fid] = {"id": fid, "name": filename, "folder": "Reels", "type": mime, "size": size, "t": t}
         with _lock:
             LIB.update(t=0, items=[])
+        _save_library_cache()
         ok = True
         return fid
     finally:
@@ -323,11 +330,14 @@ def _add_messages(msgs):
             if not p or not attachments:
                 continue
             url = attachments[0]["url"]
+            mid = msg.get("id")
             if p[0] == "v1g" and len(p) >= 2:
                 GROUP_RECORDS.setdefault(p[1], url)
                 continue
             if p[0] == "v1a" and len(p) >= 3:
-                ASSIGN_RECORDS.setdefault(p[1], []).append((p[2], url))
+                records = ASSIGN_RECORDS.setdefault(p[1], [])
+                if not any(x[1] == url for x in records):
+                    records.insert(0, (p[2], url))
                 continue
             if len(p) < 4 or p[0] != "v1":
                 continue
@@ -336,15 +346,88 @@ def _add_messages(msgs):
             except (TypeError, ValueError):
                 continue
             fid = p[1]
-            f = SCAN_FOUND.setdefault(fid, {"chunks": {}, "n": n, "message_ids": []})
-            f.setdefault("message_ids", []).append(msg.get("id"))
+            f = SCAN_FOUND.setdefault(fid, {"chunks": {}, "chunk_mids": {}, "n": n, "message_ids": []})
+            f.setdefault("chunks", {})
+            f.setdefault("chunk_mids", {})
+            f.setdefault("message_ids", [])
+            if mid and mid not in f["message_ids"]:
+                f["message_ids"].append(mid)
             if p[2] == "m":
                 f["meta"] = url
+                f["meta_mid"] = mid
             elif p[2].startswith("c"):
                 try:
-                    f["chunks"][int(p[2][1:])] = url
+                    idx = int(p[2][1:])
+                    f["chunks"][idx] = url
+                    f["chunk_mids"][idx] = mid
                 except ValueError:
                     pass
+
+def _cache_blob(aes, payload):
+    raw = zlib.compress(json.dumps(payload, separators=(",", ":")).encode(), 6)
+    iv = os.urandom(12)
+    return base64.b64encode(iv + aes.encrypt(iv, raw, None)).decode("ascii")
+
+def _load_library_cache(aes):
+    global SCAN_FOUND, META_CACHE, SCAN_BEFORE, SCAN_DONE, SCAN_NEWEST
+    global GROUP_RECORDS, ASSIGN_RECORDS, CACHE_LOADED
+    if not Q.DURABLE:
+        return False
+    try:
+        blob = Q.kv_get("library_index_v1")
+        if not blob:
+            return False
+        packed = base64.b64decode(blob)
+        payload = json.loads(zlib.decompress(aes.decrypt(packed[:12], packed[12:], None)))
+        if payload.get("version") != 1 or payload.get("channel") != V.CH:
+            return False
+        SCAN_FOUND = {
+            fid: {
+                "meta": None, "chunks": {}, "n": int(item.get("n") or 0),
+                "meta_mid": item.get("meta_mid"),
+                "chunk_mids": {int(k): val for k, val in (item.get("chunk_mids") or {}).items()},
+                "message_ids": list(item.get("message_ids") or [])
+            } for fid, item in (payload.get("found") or {}).items()
+        }
+        META_CACHE = payload.get("meta_cache") or {}
+        SCAN_BEFORE, SCAN_DONE = payload.get("scan_before"), bool(payload.get("scan_done"))
+        SCAN_NEWEST = payload.get("scan_newest")
+        GROUP_RECORDS = payload.get("groups") or {}
+        ASSIGN_RECORDS = {fid: [(x[0], x[1]) for x in records]
+                          for fid, records in (payload.get("assignments") or {}).items()}
+        CACHE_LOADED = True
+        return True
+    except Exception as exc:
+        print("library cache load failed:", str(exc)[:180], flush=True)
+        return False
+
+def _save_library_cache():
+    global CACHE_LOADED
+    aes = V.KEY.get("aes")
+    if not Q.DURABLE or aes is None:
+        return False
+    try:
+        with SCAN_LOCK:
+            payload = {
+                "version": 1, "channel": V.CH,
+                "found": {
+                    fid: {"n": int(f.get("n") or 0), "meta_mid": f.get("meta_mid"),
+                          "chunk_mids": {str(k): val for k, val in (f.get("chunk_mids") or {}).items()},
+                          "message_ids": list(f.get("message_ids") or [])}
+                    for fid, f in SCAN_FOUND.items()
+                },
+                "meta_cache": META_CACHE, "scan_before": SCAN_BEFORE,
+                "scan_done": SCAN_DONE, "scan_newest": SCAN_NEWEST,
+                "groups": GROUP_RECORDS,
+                "assignments": {fid: [[gid, url] for gid, url in records]
+                                for fid, records in ASSIGN_RECORDS.items()}
+            }
+        Q.kv_set("library_index_v1", _cache_blob(aes, payload))
+        CACHE_LOADED = True
+        return True
+    except Exception as exc:
+        print("library cache save failed:", str(exc)[:180], flush=True)
+        return False
 
 def _get_page(before=None):
     params = {"limit": 100}
@@ -353,11 +436,14 @@ def _get_page(before=None):
     return V.dc("GET", f"/channels/{V.CH}/messages", params=params).json()
 
 def verify(aes):
-    """Validate using the newest metadata available, then seed the background scan."""
-    global SCAN_BEFORE, SCAN_DONE, SCAN_ERROR
-    before = None
+    """Validate using Discord and seed the first full-history scan."""
+    global SCAN_BEFORE, SCAN_DONE, SCAN_ERROR, SCAN_NEWEST
+    before, first_page = None, True
     while True:
         msgs = _get_page(before)
+        if first_page and msgs:
+            SCAN_NEWEST = msgs[0].get("id")
+            first_page = False
         _add_messages(msgs)
         page_metas = []
         for msg in msgs:
@@ -380,29 +466,55 @@ def verify(aes):
                     continue
             return False
         if len(msgs) < 100:
-            SCAN_BEFORE = None
-            SCAN_DONE = True
-            SCAN_ERROR = ""
+            SCAN_BEFORE, SCAN_DONE, SCAN_ERROR = None, True, ""
             return True
         before = msgs[-1]["id"]
 
 def _scan_worker():
-    global SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR
+    global SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR, SCAN_NEWEST
     try:
-        while True:
-            with SCAN_LOCK:
-                before = SCAN_BEFORE
-                if SCAN_DONE:
+        with SCAN_LOCK:
+            mode, old_newest, before = SCAN_MODE, SCAN_NEWEST, SCAN_BEFORE
+        if mode == "incremental" and old_newest:
+            newest, cursor = None, None
+            while True:
+                msgs = _get_page(cursor)
+                if not msgs:
                     break
-            msgs = _get_page(before)
-            _add_messages(msgs)
-            with SCAN_LOCK:
-                if len(msgs) < 100:
-                    SCAN_BEFORE = None
-                    SCAN_DONE = True
+                if newest is None:
+                    newest = msgs[0].get("id")
+                fresh, reached_anchor = [], False
+                for msg in msgs:
+                    if msg.get("id") == old_newest:
+                        reached_anchor = True
+                        break
+                    fresh.append(msg)
+                if fresh:
+                    _add_messages(fresh)
+                if reached_anchor or len(msgs) < 100:
                     break
-                SCAN_BEFORE = msgs[-1]["id"]
-                SCAN_ERROR = ""
+                cursor = msgs[-1]["id"]
+            with SCAN_LOCK:
+                if newest:
+                    SCAN_NEWEST = newest
+                SCAN_DONE, SCAN_BEFORE, SCAN_ERROR = True, None, ""
+            _save_library_cache()
+        else:
+            while True:
+                with SCAN_LOCK:
+                    before = SCAN_BEFORE
+                    if SCAN_DONE:
+                        break
+                msgs = _get_page(before)
+                _add_messages(msgs)
+                with SCAN_LOCK:
+                    if len(msgs) < 100:
+                        SCAN_BEFORE, SCAN_DONE = None, True
+                    else:
+                        SCAN_BEFORE = msgs[-1]["id"]
+                    SCAN_ERROR = ""
+                _save_library_cache()
+            _save_library_cache()
     except Exception as e:
         with SCAN_LOCK:
             SCAN_ERROR = str(e)[:300]
@@ -411,17 +523,25 @@ def _scan_worker():
             SCAN_BUSY = False
 
 def start_scan():
-    global SCAN_BUSY
+    global SCAN_BUSY, SCAN_MODE, LAST_INCREMENTAL_SCAN
     with SCAN_LOCK:
-        if SCAN_DONE or SCAN_BUSY:
+        if SCAN_BUSY:
             return
+        if SCAN_DONE:
+            if not CACHE_LOADED or not SCAN_NEWEST or time.time() - LAST_INCREMENTAL_SCAN < 60:
+                return
+            SCAN_MODE = "incremental"
+            LAST_INCREMENTAL_SCAN = time.time()
+        else:
+            SCAN_MODE = "initial"
         SCAN_BUSY = True
     threading.Thread(target=_scan_worker, daemon=True).start()
 
 def _library_snapshot():
     with SCAN_LOCK:
-        return {k: {"meta": v.get("meta"), "chunks": dict(v["chunks"]), "n": v["n"], "message_ids": list(v.get("message_ids", []))}
-                for k, v in SCAN_FOUND.items() if v.get("meta")}
+        return {k: {"meta": v.get("meta"), "chunks": dict(v.get("chunks") or {}), "chunk_mids": dict(v.get("chunk_mids") or {}),
+                     "meta_mid": v.get("meta_mid"), "n": v["n"], "message_ids": list(v.get("message_ids", []))}
+                for k, v in SCAN_FOUND.items() if v.get("meta") or v.get("meta_mid"))
 
 def library():
     found = _library_snapshot()
@@ -441,7 +561,7 @@ def library():
             except Exception:
                 return None
         item = dict(cached)
-        item["ok"] = len(f["chunks"]) == f["n"]
+        item["ok"] = len(f.get("chunks") or {}) == f["n"] or len(f.get("chunk_mids") or {}) == f["n"]
         return item
     with ThreadPoolExecutor(max_workers=8) as ex:
         items = [x for x in ex.map(one, found.items()) if x]
@@ -461,8 +581,9 @@ def end_session():
         LIB.update(t=0, items=[])
         NAMES.clear()
     with SCAN_LOCK:
-        global SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR
+        global SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR, SCAN_NEWEST, CACHE_LOADED
         SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR = {}, None, False, False, ""
+        SCAN_NEWEST, CACHE_LOADED = None, False
         META_CACHE.clear()
         GROUP_RECORDS.clear()
         ASSIGN_RECORDS.clear()
@@ -489,11 +610,14 @@ def unlock():
     raw = PBKDF2HMAC(SHA256(), 32, b"vault-v1", 300000).derive(pw.encode())
     aes = AESGCM(raw)
     with SCAN_LOCK:
-        global SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR
+        global SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR, SCAN_NEWEST, CACHE_LOADED
         SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR = {}, None, False, False, ""
+        SCAN_NEWEST, CACHE_LOADED = None, False
         META_CACHE.clear()
     try:
-        valid = verify(aes)
+        valid = _load_library_cache(aes)
+        if not valid:
+            valid = verify(aes)
     except Exception as e:
         return ("Vault check failed: " + str(e)[:250]), 503
     if not valid:
@@ -504,6 +628,7 @@ def unlock():
     V.KEY["aes"], V.KEY["raw"] = aes, raw
     _persist_worker_key(raw)
     _WAKE.set()
+    _save_library_cache()
     with _lock:
         LIB.update(t=0, items=[])
     start_scan()
@@ -562,6 +687,7 @@ def create_group():
     gid = secrets.token_hex(6)
     msg = _post_encrypted_record(f"v1g {gid}", {"name": name}, f"g{gid}.bin")
     GROUP_RECORDS[gid] = msg["attachments"][0]["url"]
+    _save_library_cache()
     return jsonify(id=gid, name=name)
 
 @app.post("/api/groups/color")
@@ -582,6 +708,7 @@ def set_group_color():
         "name": str(old_data.get("name", "Folder")), "color": color
     }, f"g{gid}.bin")
     GROUP_RECORDS[gid] = msg["attachments"][0]["url"]
+    _save_library_cache()
     return jsonify(id=gid, color=color)
 @app.post("/api/groups/assign")
 def assign_group():
@@ -594,6 +721,7 @@ def assign_group():
     stored_gid = gid or "none"
     msg = _post_encrypted_record(f"v1a {fid} {stored_gid}", {"group": gid}, f"a{fid}.bin")
     ASSIGN_RECORDS.setdefault(fid, []).insert(0, (stored_gid, msg["attachments"][0]["url"]))
+    _save_library_cache()
     return "", 204
 
 @app.delete("/api/files/<fid>")
@@ -616,6 +744,7 @@ def delete_file(fid):
         SCAN_FOUND.pop(fid, None)
         META_CACHE.pop(fid, None)
         ASSIGN_RECORDS.pop(fid, None)
+    _save_library_cache()
     with _lock:
         LIB.update(t=0, items=[])
         NAMES.pop(fid, None)
@@ -629,8 +758,9 @@ def stream(fid):
         found = SCAN_FOUND.get(fid)
         item = META_CACHE.get(fid)
         if found and item and len(found["chunks"]) == found["n"]:
-            info = {"chunks": dict(found["chunks"]), "n": found["n"],
-                    "size": int(item.get("size") or 0), "type": item.get("type") or ""}
+            info = {"chunks": dict(found.get("chunks") or {}),
+                    "chunk_message_ids": dict(found.get("chunk_mids") or {}),
+                    "n": found["n"], "size": int(item.get("size") or 0), "type": item.get("type") or ""}
             with V._flock:
                 V._files[fid] = (time.time(), info)
     r = V.stream(fid)
@@ -667,7 +797,8 @@ def upload_start():
     try:
         url = resp.json()["attachments"][0]["url"]
         with SCAN_LOCK:
-            SCAN_FOUND[fid] = {"meta": url, "chunks": {}, "n": n, "message_ids": [resp.json().get("id")]}
+            SCAN_FOUND[fid] = {"meta": url, "chunks": {}, "chunk_mids": {}, "n": n,
+                               "meta_mid": resp.json().get("id"), "message_ids": [resp.json().get("id")]}
             META_CACHE[fid] = {"id": fid, "name": name, "folder": folder, "type": mime,
                                "size": size, "t": int(time.time() * 1000)}
     except Exception:
@@ -696,13 +827,17 @@ def upload_chunk():
         with SCAN_LOCK:
             if fid in SCAN_FOUND:
                 SCAN_FOUND[fid]["chunks"][i] = url
-                SCAN_FOUND[fid].setdefault("message_ids", []).append(resp.json().get("id"))
+                SCAN_FOUND[fid].setdefault("chunk_mids", {})[i] = resp.json().get("id")
+                mid = resp.json().get("id")
+                if mid and mid not in SCAN_FOUND[fid].setdefault("message_ids", []):
+                    SCAN_FOUND[fid]["message_ids"].append(mid)
     except Exception:
         pass
     if i == u["n"] - 1:
         UPLOADS.pop(fid, None)
         with _lock:
             LIB.update(t=0, items=[])
+        _save_library_cache()
     return "", 204
 
 _start_reel_workers()
