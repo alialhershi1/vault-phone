@@ -225,7 +225,7 @@ function render(){
 async function load(){
  if(loading)return;loading=true;
  try{
-  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);render();if(!$("reelsPanel").classList.contains("hidden"))renderReels();
+  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);render();if(!$("reelsPanel").classList.contains("hidden"))renderReels();scanReelDurations();
   if(data.scanning){say("Loading the rest of your library in the background · "+allItems.length+" found so far.");}
   else{say("Vault ready · "+allItems.length+" files loaded.");if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
   if(data.error)say("Library scan paused: "+data.error+" · Refresh to retry.");
@@ -234,7 +234,45 @@ async function load(){
 
 /* Reels feed: one active video, three ahead, one behind. */
 let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0;
-function isReel(f){return !!(f && f.ok && isVideo(f))}
+const reelDurationCache=new Map();
+let reelDurationScanRunning=false;
+function isReel(f){return !!(f && f.ok && isVideo(f) && reelDurationCache.has(f.id) && reelDurationCache.get(f.id)>900)}
+async function scanReelDurations(){
+ if(reelDurationScanRunning)return;
+ reelDurationScanRunning=true;
+ try{
+  const pending=allItems.filter(f=>f.ok&&isVideo(f)&&!reelDurationCache.has(f.id));
+  let cursor=0,checked=0;
+  async function worker(){
+   while(cursor<pending.length){
+    const f=pending[cursor++];
+    const v=document.createElement("video");
+    v.preload="metadata";v.muted=true;v.src=auth("/api/stream/"+encodeURIComponent(f.id));
+    try{
+     const duration=await new Promise(resolve=>{
+      let settled=false;
+      const finish=value=>{if(settled)return;settled=true;clearTimeout(timer);resolve(value)};
+      const timer=setTimeout(()=>finish(null),25000);
+      v.addEventListener("loadedmetadata",()=>finish(Number.isFinite(v.duration)?v.duration:null),{once:true});
+      v.addEventListener("error",()=>finish(null),{once:true});
+      v.load();
+     });
+     if(duration!==null)reelDurationCache.set(f.id,duration);
+     else reelDurationCache.set(f.id,0);
+    }finally{
+     v.pause();v.removeAttribute("src");v.load();
+     checked++;
+     $("reelStatus").textContent="Checking video lengths · "+checked+" of "+pending.length;
+    }
+   }
+  }
+  await Promise.all([worker(),worker()]);
+ }finally{
+  reelDurationScanRunning=false;
+  renderReels();
+  if($("reelsPanel")&&!$("reelsPanel").classList.contains("hidden"))activateReel(reelActive<0?0:reelActive);
+ }
+}
 function setVaultTab(tab){
  const reels=tab==="reels";
  $("library").classList.toggle("hidden",reels);
@@ -300,9 +338,10 @@ function renderReels(){
  reelItems=nextItems;
  $("reelCount").textContent=reelItems.length?" · "+reelItems.length:"";
  if(!reelItems.length){
+  const checking=allItems.some(f=>f.ok&&isVideo(f)&&!reelDurationCache.has(f.id));
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
   reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div>';
-  $("reelStatus").textContent="Main feed: videos already stored in your server vault. Phone uploads are optional.";reelActive=-1;return;
+  $("reelStatus").textContent=checking?"Checking video lengths to find videos longer than 15 minutes…":"No videos longer than 15 minutes were found. Phone uploads are optional.";reelActive=-1;return;
  }
  if(changed){
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
