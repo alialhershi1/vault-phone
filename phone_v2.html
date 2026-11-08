@@ -294,16 +294,23 @@ function activateReel(index){
  $("reelStatus").textContent=(index+1)+" of "+reelItems.length+" · Reels";
 }
 function renderReels(){
- reelItems=allItems.filter(isReel).sort((a,b)=>(a.t||0)-(b.t||0));
+ const previousId=reelItems[reelActive]?.id||"";
+ const nextItems=allItems.filter(isReel).sort((a,b)=>(b.t||0)-(a.t||0));
+ const changed=nextItems.length!==reelItems.length||nextItems.some((x,i)=>x.id!==reelItems[i]?.id);
+ reelItems=nextItems;
  $("reelCount").textContent=reelItems.length?" · "+reelItems.length:"";
- if(reelActive>=reelItems.length)reelActive=reelItems.length-1;
  if(!reelItems.length){
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
   reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Your Reels folder is empty.<br>Choose videos above to add your first reels.</div>';
   $("reelStatus").textContent="Videos uploaded here are stored in your encrypted Reels folder.";reelActive=-1;return;
  }
- if(reelNodes.size===0){$("reelFeed").innerHTML="";reelActive=-1;ensureReelWindow(0)}
- else ensureReelWindow(Math.max(0,reelActive));
+ if(changed){
+  for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
+  reelNodes.clear();$("reelFeed").innerHTML="";
+  reelActive=previousId?reelItems.findIndex(x=>x.id===previousId):-1;
+ }
+ if(reelActive<0)reelActive=0;
+ ensureReelWindow(reelActive);
 }
 function nearestReel(){
  const feed=$("reelFeed"),slides=[...feed.querySelectorAll(".reel-slide")];if(!slides.length)return;
