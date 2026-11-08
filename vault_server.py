@@ -102,13 +102,29 @@ def get_chunk(fid, idx):
             if k in _cache:
                 _cache.move_to_end(k); return _cache[k]
         data = None
+        info = get_info(fid)
+        url = info["chunks"].get(idx)
+        mid = (info.get("chunk_message_ids") or {}).get(idx)
         for attempt in (0, 1):
-            info = get_info(fid, refresh=bool(attempt))
-            url = info["chunks"].get(idx)
-            if not url: abort(404)
+            if not url and mid:
+                msg = dc("GET", f"/channels/{CH}/messages/{mid}").json()
+                attachments = msg.get("attachments") or []
+                if attachments:
+                    url = attachments[0].get("url")
+                    info["chunks"][idx] = url
+            if not url:
+                abort(404)
             r = requests.get(url, timeout=300)
             if r.ok:
-                data = unseal(r.content); break
+                data = unseal(r.content)
+                break
+            if attempt == 0 and mid:
+                msg = dc("GET", f"/channels/{CH}/messages/{mid}").json()
+                attachments = msg.get("attachments") or []
+                url = attachments[0].get("url") if attachments else None
+                info["chunks"][idx] = url
+            else:
+                break
         if data is None: abort(502)
         with _clock:
             _cache[k] = data; _cache_bytes += len(data)
