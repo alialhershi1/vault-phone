@@ -31,7 +31,6 @@ ASSIGN_RECORDS = {}
 _REEL_JOBS = {}
 _REEL_JOB_LOCK = threading.RLock()
 _REEL_EXECUTOR = ThreadPoolExecutor(max_workers=1)
-_REEL_MAX_LINKS = 10
 _REEL_MAX_BYTES = 500 * 1024 * 1024
 
 def _reel_job_update(job_id, **values):
@@ -189,14 +188,10 @@ def reels_download():
             urls.append(url)
     if not urls:
         return "Paste at least one Instagram Reel link.", 400
-    if len(urls) > _REEL_MAX_LINKS:
-        return f"Maximum {_REEL_MAX_LINKS} links per batch.", 400
     job_ids = []
     now = time.time()
     with _REEL_JOB_LOCK:
         active = sum(1 for item in _REEL_JOBS.values() if item.get("status") in {"queued", "downloading", "storing"})
-        if active + len(urls) > 20:
-            return "The download queue is full. Wait for some downloads to finish.", 429
         for url in urls:
             job_id = secrets.token_hex(8)
             _REEL_JOBS[job_id] = {"id": job_id, "url": url, "status": "queued", "percent": 0,
