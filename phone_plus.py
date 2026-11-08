@@ -54,6 +54,7 @@ def _background_library_cache():
                     print("library cache: background warm-up started", flush=True)
             if initialized:
                 P.start_scan()
+                P.start_meta_fill()
         except Exception as exc:
             print("library cache background worker:", str(exc)[:180], flush=True)
         time.sleep(60)
