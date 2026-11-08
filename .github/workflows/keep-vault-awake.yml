@@ -1,0 +1,14 @@
+name: Keep Vault cache worker awake
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Wake and keep the Render service active
+        run: curl --fail --silent --show-error --max-time 30 https://vault-phone.onrender.com/health
