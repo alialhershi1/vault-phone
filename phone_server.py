@@ -541,7 +541,7 @@ def _library_snapshot():
     with SCAN_LOCK:
         return {k: {"meta": v.get("meta"), "chunks": dict(v.get("chunks") or {}), "chunk_mids": dict(v.get("chunk_mids") or {}),
                      "meta_mid": v.get("meta_mid"), "n": v["n"], "message_ids": list(v.get("message_ids", []))}
-                for k, v in SCAN_FOUND.items() if v.get("meta") or v.get("meta_mid"))
+                for k, v in SCAN_FOUND.items() if v.get("meta") or v.get("meta_mid") }
 
 def library():
     found = _library_snapshot()
