@@ -233,7 +233,7 @@ async function load(){
 }
 
 /* Reels feed: one active video, three ahead, one behind. */
-let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0;
+let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0,reelFullscreenSlide=null;
 const reelDurationCache=new Map();
 let reelDurationScanRunning=false;
 function isReel(f){const d=reelDurationCache.get(f?.id);return !!(f&&f.ok&&isVideo(f)&&Number.isFinite(d)&&d>0&&d<900)}
@@ -302,13 +302,14 @@ function makeReelNode(item,index){
  video.addEventListener("play",()=>{play.textContent="Ⅱ";play.title="Pause"});
  video.addEventListener("pause",()=>{play.textContent="▶";play.title="Play"});
  const fullscreen=document.createElement("button");fullscreen.type="button";fullscreen.textContent="⛶";fullscreen.title="Full screen";fullscreen.setAttribute("aria-label","Enter full screen");
- fullscreen.onclick=async()=>{
+ fullscreen.onclick=async(event)=>{
+  event.preventDefault();event.stopPropagation();
   try{
-   if(document.fullscreenElement){await document.exitFullscreen();return}
+   if(document.fullscreenElement||document.webkitFullscreenElement){if(document.exitFullscreen)await document.exitFullscreen();else if(document.webkitExitFullscreen)document.webkitExitFullscreen();return}
+   activateReel(Number(slide.dataset.index));
    if(slide.requestFullscreen)await slide.requestFullscreen();
-   else if(video.webkitEnterFullscreen)video.webkitEnterFullscreen();
    else {$("reelStatus").textContent="Full screen isn't supported by this browser."}
-  }catch(e){$("reelStatus").textContent="Couldn't enter full screen. Try rotating your phone."}
+  }catch(e){$("reelStatus").textContent="Couldn't enter full screen. Try your browser's full-screen option."}
  };
  actions.append(fullscreen,play);overlay.append(name,actions);slide.append(video,overlay);
  return slide;
@@ -332,14 +333,39 @@ function ensureReelWindow(center){
 }
 function activateReel(index){
  if(index<0||index>=reelItems.length)return;
+ if(reelFullscreenSlide&&index!==reelActive)return;
  reelActive=index;ensureReelWindow(index);
  for(const [i,node] of reelNodes){
   const v=node.querySelector("video");
-  if(i===index){v.muted=false;v.defaultMuted=false;v.play().catch(()=>{$("reelStatus").textContent="Tap the video to start playback with sound."})}
-  else v.pause();
+  if(i===index){
+   v.muted=false;v.defaultMuted=false;
+   if(v.paused)v.play().catch(()=>{$("reelStatus").textContent="Tap the video to start playback with sound."});
+  }else{v.pause();v.muted=true;v.defaultMuted=true}
  }
  $("reelStatus").textContent=(index+1)+" of "+reelItems.length+" · Server vault";
 }
+function syncReelFullscreen(){
+ const active=document.fullscreenElement||document.webkitFullscreenElement;
+ const feed=$("reelFeed");
+ if(active&&active.classList&&active.classList.contains("reel-slide")){
+  reelFullscreenSlide=active;
+  const index=Number(active.dataset.index);
+  if(Number.isInteger(index))reelActive=index;
+  feed.style.overflowY="hidden";
+  for(const [i,node] of reelNodes){
+   const v=node.querySelector("video");
+   if(node===active){v.muted=false;v.defaultMuted=false;if(v.paused)v.play().catch(()=>{})}
+   else{v.pause();v.muted=true;v.defaultMuted=true}
+  }
+ }else if(reelFullscreenSlide){
+  reelFullscreenSlide=null;
+  feed.style.overflowY="";
+  for(const [i,node] of reelNodes){const v=node.querySelector("video");if(i!==reelActive){v.pause();v.muted=true;v.defaultMuted=true}}
+  requestAnimationFrame(()=>{nearestReel()});
+ }
+}
+document.addEventListener("fullscreenchange",syncReelFullscreen);
+document.addEventListener("webkitfullscreenchange",syncReelFullscreen);
 function renderReels(){
  const previousId=reelItems[reelActive]?.id||"";
  const nextItems=allItems.filter(isReel).sort((a,b)=>(b.t||0)-(a.t||0));
@@ -372,6 +398,7 @@ function nearestReel(){
  const idx=Number(best.dataset.index);if(Number.isInteger(idx)&&idx!==reelActive)activateReel(idx);
 }
 $("reelFeed").addEventListener("scroll",()=>{
+ if(reelFullscreenSlide||document.fullscreenElement||document.webkitFullscreenElement)return;
  if(reelScrollTick)return;
  reelScrollTick=requestAnimationFrame(()=>{reelScrollTick=0;nearestReel()});
 },{passive:true});
