@@ -56,8 +56,8 @@ def _valid_instagram_reel_url(raw):
 
 def _safe_reel_filename(title, extension):
     base = os.path.basename(str(title or "Instagram Reel"))
-    base = re.sub(r'[\\\\/:*?"<>|\\x00-\\x1f]+', " ", base)
-    base = re.sub(r"\\s+", " ", base).strip(" .")[:130] or "Instagram Reel"
+    base = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", base)
+    base = re.sub(r"\s+", " ", base).strip(" .")[:130] or "Instagram Reel"
     ext = re.sub(r"[^a-z0-9]", "", str(extension or "mp4").lower())[:8] or "mp4"
     return base + "." + ext
 
