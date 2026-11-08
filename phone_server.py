@@ -224,6 +224,16 @@ def lib():
 
 @app.get("/api/stream/<fid>")
 def stream(fid):
+    # Reuse the phone app's indexed Discord message URLs. Otherwise the
+    # streaming helper performs a fresh full channel scan per new video.
+    with SCAN_LOCK:
+        found = SCAN_FOUND.get(fid)
+        item = META_CACHE.get(fid)
+        if found and item and len(found["chunks"]) == found["n"]:
+            info = {"chunks": dict(found["chunks"]), "n": found["n"],
+                    "size": int(item.get("size") or 0), "type": item.get("type") or ""}
+            with V._flock:
+                V._files[fid] = (time.time(), info)
     r = V.stream(fid)
     it = NAMES.get(fid)
     if it:
