@@ -23,6 +23,8 @@ SCAN_DONE = False
 SCAN_BUSY = False
 SCAN_ERROR = ""
 FAILS = []
+UNLOCK_JOBS = {}
+UNLOCK_LOCK = threading.RLock()
 UPLOADS = {}
 GROUP_RECORDS = {}
 ASSIGN_RECORDS = {}
@@ -377,6 +379,32 @@ def index():
 def health():
     return {"ok": True}
 
+def _unlock_worker(job_id, password):
+    now = time.time()
+    try:
+        aes = AESGCM(PBKDF2HMAC(SHA256(), 32, b"vault-v1", 300000).derive(password.encode()))
+        with SCAN_LOCK:
+            global SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR
+            SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR = {}, None, False, False, ""
+            META_CACHE.clear()
+        valid = verify(aes)
+        if not valid:
+            FAILS.append(now)
+            with UNLOCK_LOCK:
+                UNLOCK_JOBS[job_id] = {"state": "error", "message": "Incorrect vault password."}
+            return
+        V.clear_stream_state()
+        session_token = secrets.token_urlsafe(24)
+        V.KEY["aes"], V.KEY["token"] = aes, session_token
+        with _lock:
+            LIB.update(t=0, items=[])
+        start_scan()
+        with UNLOCK_LOCK:
+            UNLOCK_JOBS[job_id] = {"state": "success", "t": session_token}
+    except Exception as e:
+        with UNLOCK_LOCK:
+            UNLOCK_JOBS[job_id] = {"state": "error", "message": "Vault check failed: " + str(e)[:220]}
+
 @app.post("/api/unlock")
 def unlock():
     now = time.time()
@@ -386,25 +414,22 @@ def unlock():
     pw = (request.get_json(silent=True) or {}).get("p", "")
     if not pw:
         return "Enter the vault password.", 400
-    aes = AESGCM(PBKDF2HMAC(SHA256(), 32, b"vault-v1", 300000).derive(pw.encode()))
-    with SCAN_LOCK:
-        global SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR
-        SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR = {}, None, False, False, ""
-        META_CACHE.clear()
-    try:
-        valid = verify(aes)
-    except Exception as e:
-        return ("Vault check failed: " + str(e)[:250]), 503
-    if not valid:
-        FAILS.append(now)
-        time.sleep(0.5)
-        return "Incorrect vault password.", 401
-    V.clear_stream_state()
-    V.KEY["aes"], V.KEY["token"] = aes, secrets.token_urlsafe(24)
-    with _lock:
-        LIB.update(t=0, items=[])
-    start_scan()
-    return jsonify(t=V.KEY["token"])
+    job_id = secrets.token_urlsafe(24)
+    with UNLOCK_LOCK:
+        for key, job in list(UNLOCK_JOBS.items()):
+            if job.get("created", 0) < now - 900:
+                UNLOCK_JOBS.pop(key, None)
+        UNLOCK_JOBS[job_id] = {"state": "pending", "created": now}
+    threading.Thread(target=_unlock_worker, args=(job_id, pw), daemon=True).start()
+    return jsonify(job=job_id, state="pending"), 202
+
+@app.get("/api/unlock/<job_id>")
+def unlock_status(job_id):
+    with UNLOCK_LOCK:
+        job = UNLOCK_JOBS.get(job_id)
+        if not job:
+            return "Unlock request expired. Please try again.", 404
+        return jsonify({k: v for k, v in job.items() if k != "created"})
 
 @app.post("/api/lock")
 def lock():
