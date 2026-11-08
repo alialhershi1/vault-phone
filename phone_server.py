@@ -173,8 +173,10 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
 
 def _friendly(msg):
     low = msg.lower()
+    if "exceeded the rate-limit" in low or "redirected to the login page" in low:
+        return "Instagram blocked anonymous access. Add an authenticated IG_COOKIES value in Render, then retry this job."
     if "empty media response" in low or any(k in low for k in _THROTTLE[1:]):
-        return "Instagram refused the request (rate limit, private post, or login needed)."
+        return "Instagram temporarily rate-limited this request. It will retry after a cooldown."
     if "private" in low or "login required" in low:
         return "This Reel is not publicly downloadable."
     return msg.replace("ERROR: ", "")[:200]
@@ -182,8 +184,9 @@ def _friendly(msg):
 def _handle_failure(job, exc):
     raw = str(exc).strip() or "Download failed."
     low = raw.lower()
-    throttled = any(k in low for k in _THROTTLE)
-    permanent = (not throttled) and any(k in low for k in _PERMANENT)
+    auth_blocked = ("exceeded the rate-limit" in low or "redirected to the login page" in low) and not os.environ.get("IG_COOKIES", "").strip()
+    throttled = any(k in low for k in _THROTTLE) and not auth_blocked
+    permanent = auth_blocked or ((not throttled) and any(k in low for k in _PERMANENT))
     attempts = int(job.get("attempts") or 1)
     if throttled:
         _IG["cool"] = time.time() + min(900, 90 * attempts)  # both workers back off
@@ -779,19 +782,80 @@ def delete_file(fid):
         NAMES.pop(fid, None)
     return "", 204
 
+def _hydrate_cached_stream(fid):
+    """Rebuild expiring Discord attachment URLs from cached message IDs.
+    This avoids a full channel-history scan after every restart or cache load."""
+    with SCAN_LOCK:
+        found = SCAN_FOUND.get(fid)
+        if not found:
+            return False
+        n = int(found.get("n") or 0)
+        meta_mid = found.get("meta_mid")
+        chunk_mids = {int(k): v for k, v in (found.get("chunk_mids") or {}).items()}
+        chunks = dict(found.get("chunks") or {})
+        meta_url = found.get("meta")
+        cached = dict(META_CACHE.get(fid) or {})
+    if not n or not meta_mid or len(chunk_mids) != n:
+        return False
+    try:
+        if not meta_url:
+            msg = V.dc("GET", f"/channels/{V.CH}/messages/{meta_mid}").json()
+            attachments = msg.get("attachments") or []
+            if not attachments:
+                return False
+            meta_url = attachments[0].get("url")
+        if not cached.get("size"):
+            response = requests.get(meta_url, timeout=30)
+            response.raise_for_status()
+            meta = json.loads(V.KEY["aes"].decrypt(response.content[:12], response.content[12:], None))
+            cached = {"id": fid, "name": meta.get("name", "?"), "folder": meta.get("folder") or "",
+                      "type": meta.get("type") or "", "size": int(meta.get("size") or 0),
+                      "t": meta.get("t", 0)}
+        for idx in range(n):
+            if chunks.get(idx):
+                continue
+            mid = chunk_mids.get(idx)
+            if not mid:
+                return False
+            msg = V.dc("GET", f"/channels/{V.CH}/messages/{mid}").json()
+            attachments = msg.get("attachments") or []
+            if not attachments:
+                return False
+            chunks[idx] = attachments[0].get("url")
+        if not cached.get("size") or any(not chunks.get(i) for i in range(n)):
+            return False
+        info = {"chunks": chunks, "chunk_message_ids": chunk_mids, "n": n,
+                "size": cached["size"], "type": cached.get("type") or ""}
+        with SCAN_LOCK:
+            current = SCAN_FOUND.get(fid)
+            if current:
+                current["meta"] = meta_url
+                current["chunks"] = chunks
+            META_CACHE[fid] = cached
+        with V._flock:
+            V._files[fid] = (time.time(), info)
+        _save_library_cache()
+        return True
+    except Exception as exc:
+        print("cached stream hydration failed:", str(exc)[:160], flush=True)
+        return False
+
+
 @app.get("/api/stream/<fid>")
 def stream(fid):
-    # Reuse the phone app's indexed Discord message URLs. Otherwise the
-    # streaming helper performs a fresh full channel scan per new video.
+    # Reuse cached attachment URLs when available. On a cache restore, refresh
+    # only this file's message IDs instead of scanning the entire Discord channel.
     with SCAN_LOCK:
         found = SCAN_FOUND.get(fid)
         item = META_CACHE.get(fid)
-        if found and item and len(found["chunks"]) == found["n"]:
+        if found and item and len(found.get("chunks") or {}) == found.get("n"):
             info = {"chunks": dict(found.get("chunks") or {}),
                     "chunk_message_ids": dict(found.get("chunk_mids") or {}),
                     "n": found["n"], "size": int(item.get("size") or 0), "type": item.get("type") or ""}
             with V._flock:
                 V._files[fid] = (time.time(), info)
+    if not V._files.get(fid) or time.time() - V._files[fid][0] >= 600:
+        _hydrate_cached_stream(fid)
     r = V.stream(fid)
     it = NAMES.get(fid)
     if it:
