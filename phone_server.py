@@ -579,7 +579,11 @@ def library():
         NAMES.update({x["id"]: x for x in items})
     with SCAN_LOCK:
         scanning, error = (not SCAN_DONE) or SCAN_BUSY, SCAN_ERROR
-    return {"items": items, "scanning": scanning, "error": error}
+        cache_loaded = CACHE_LOADED
+        indexed_files = len(SCAN_FOUND)
+    return {"items": items, "scanning": scanning, "error": error,
+            "cache": {"durable": Q.DURABLE, "loaded": cache_loaded,
+                      "indexed": indexed_files, "db_note": Q.ERROR}}
 
 def end_session():
     V.KEY["aes"] = V.KEY["token"] = None
