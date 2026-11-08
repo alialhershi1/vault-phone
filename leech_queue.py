@@ -5,7 +5,7 @@ import os, sqlite3, threading, time
 
 DB_URL = os.environ.get("DATABASE_URL", "").strip()
 PG = DB_URL.startswith(("postgres://", "postgresql://"))
-SQLITE_PATH = os.environ.get("LEECH_QUEUE_SQLITE", "/tmp/reel_queue.db")
+SQLITE_PATH = os.environ.get("LEECH_QUEUE_SQLITE", "/tmp/vault_leech_queue.db")
 ERROR = ""          # last DB problem, shown in the UI
 DURABLE = False
 _psycopg = None
