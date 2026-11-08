@@ -24,6 +24,8 @@ SCAN_BUSY = False
 SCAN_ERROR = ""
 FAILS = []
 UPLOADS = {}
+GROUP_RECORDS = {}
+ASSIGN_RECORDS = {}
 
 def authed():
     tok = V.KEY["token"]
@@ -34,15 +36,25 @@ def _add_messages(msgs):
     with SCAN_LOCK:
         for msg in msgs:
             p = msg.get("content", "").split()
-            if len(p) < 4 or p[0] != "v1" or not msg.get("attachments"):
+            attachments = msg.get("attachments") or []
+            if not p or not attachments:
+                continue
+            url = attachments[0]["url"]
+            if p[0] == "v1g" and len(p) >= 2:
+                GROUP_RECORDS.setdefault(p[1], url)
+                continue
+            if p[0] == "v1a" and len(p) >= 3:
+                ASSIGN_RECORDS.setdefault(p[1], []).append((p[2], url))
+                continue
+            if len(p) < 4 or p[0] != "v1":
                 continue
             try:
                 n = int(p[3])
             except (TypeError, ValueError):
                 continue
             fid = p[1]
-            f = SCAN_FOUND.setdefault(fid, {"chunks": {}, "n": n})
-            url = msg["attachments"][0]["url"]
+            f = SCAN_FOUND.setdefault(fid, {"chunks": {}, "n": n, "message_ids": []})
+            f.setdefault("message_ids", []).append(msg.get("id"))
             if p[2] == "m":
                 f["meta"] = url
             elif p[2].startswith("c"):
@@ -125,7 +137,7 @@ def start_scan():
 
 def _library_snapshot():
     with SCAN_LOCK:
-        return {k: {"meta": v.get("meta"), "chunks": dict(v["chunks"]), "n": v["n"]}
+        return {k: {"meta": v.get("meta"), "chunks": dict(v["chunks"]), "n": v["n"], "message_ids": list(v.get("message_ids", []))}
                 for k, v in SCAN_FOUND.items() if v.get("meta")}
 
 def library():
@@ -169,6 +181,8 @@ def end_session():
         global SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR
         SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR = {}, None, False, False, ""
         META_CACHE.clear()
+        GROUP_RECORDS.clear()
+        ASSIGN_RECORDS.clear()
 
 @app.get("/")
 def index():
@@ -222,6 +236,84 @@ def lib():
     start_scan()
     return jsonify(library())
 
+def _post_encrypted_record(content, payload, filename):
+    r = V.dc("POST", f"/channels/{V.CH}/messages", data={"content": content},
+             files={"files[0]": (filename, seal(json.dumps(payload).encode()))})
+    r.raise_for_status()
+    return r.json()
+
+@app.get("/api/groups")
+def get_groups():
+    if not authed():
+        abort(403)
+    groups = []
+    for gid, url in list(GROUP_RECORDS.items()):
+        try:
+            raw = requests.get(url, timeout=15).content
+            data = json.loads(V.KEY["aes"].decrypt(raw[:12], raw[12:], None))
+            groups.append({"id": gid, "name": str(data.get("name", "Folder"))})
+        except Exception:
+            continue
+    assignments = {}
+    for fid, records in list(ASSIGN_RECORDS.items()):
+        if records:
+            gid, url = records[0]
+            try:
+                raw = requests.get(url, timeout=15).content
+                data = json.loads(V.KEY["aes"].decrypt(raw[:12], raw[12:], None))
+                assignments[fid] = data.get("group", gid)
+            except Exception:
+                assignments[fid] = gid
+    return jsonify(groups=groups, assignments=assignments)
+
+@app.post("/api/groups")
+def create_group():
+    if not authed():
+        abort(403)
+    name = str((request.get_json(silent=True) or {}).get("name", "")).strip()[:60]
+    if not name:
+        return "Enter a folder name.", 400
+    gid = secrets.token_hex(6)
+    msg = _post_encrypted_record(f"v1g {gid}", {"name": name}, f"g{gid}.bin")
+    GROUP_RECORDS[gid] = msg["attachments"][0]["url"]
+    return jsonify(id=gid, name=name)
+
+@app.post("/api/groups/assign")
+def assign_group():
+    if not authed():
+        abort(403)
+    d = request.get_json(silent=True) or {}
+    fid, gid = str(d.get("file", "")), str(d.get("group", ""))
+    if fid not in NAMES or (gid and gid not in GROUP_RECORDS):
+        return "File or folder not found.", 404
+    if not gid:
+        ASSIGN_RECORDS.pop(fid, None)
+        return "", 204
+    msg = _post_encrypted_record(f"v1a {fid} {gid}", {"group": gid}, f"a{fid}.bin")
+    ASSIGN_RECORDS.setdefault(fid, []).insert(0, (gid, msg["attachments"][0]["url"]))
+    return "", 204
+
+@app.delete("/api/files/<fid>")
+def delete_file(fid):
+    if not authed():
+        abort(403)
+    with SCAN_LOCK:
+        found = SCAN_FOUND.get(fid)
+        ids = list(found.get("message_ids", [])) if found else []
+    if not ids:
+        return "File not found.", 404
+    for mid in ids:
+        if mid:
+            V.dc("DELETE", f"/channels/{V.CH}/messages/{mid}")
+    with SCAN_LOCK:
+        SCAN_FOUND.pop(fid, None)
+        META_CACHE.pop(fid, None)
+        ASSIGN_RECORDS.pop(fid, None)
+    with _lock:
+        LIB.update(t=0, items=[])
+        NAMES.pop(fid, None)
+    return "", 204
+
 @app.get("/api/stream/<fid>")
 def stream(fid):
     # Reuse the phone app's indexed Discord message URLs. Otherwise the
@@ -268,7 +360,7 @@ def upload_start():
     try:
         url = resp.json()["attachments"][0]["url"]
         with SCAN_LOCK:
-            SCAN_FOUND[fid] = {"meta": url, "chunks": {}, "n": n}
+            SCAN_FOUND[fid] = {"meta": url, "chunks": {}, "n": n, "message_ids": [resp.json().get("id")]}
             META_CACHE[fid] = {"id": fid, "name": name, "folder": folder, "type": mime,
                                "size": size, "t": int(time.time() * 1000)}
     except Exception:
@@ -297,6 +389,7 @@ def upload_chunk():
         with SCAN_LOCK:
             if fid in SCAN_FOUND:
                 SCAN_FOUND[fid]["chunks"][i] = url
+                SCAN_FOUND[fid].setdefault("message_ids", []).append(resp.json().get("id"))
     except Exception:
         pass
     if i == u["n"] - 1:
