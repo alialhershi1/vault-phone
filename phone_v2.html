@@ -247,7 +247,7 @@ vid.addEventListener("click",(e)=>{
  if(singleTapTimer)clearTimeout(singleTapTimer);
  singleTapTimer=setTimeout(()=>{singleTapTimer=null;togglePlayback()},260);
 });
-vid.addEventListener("dblclick",e=>{e.preventDefault();if(singleTapTimer)clearTimeout(singleTapTimer);singleTapTimer=null;seekBy(10,e.clientX<vid.getBoundingClientRect().left+vid.getBoundingClientRect().width/2?-1:1)});
+/* The second click in the tap handler performs the 10-second seek on both desktop and touch. */
 $("player").addEventListener("pointermove",showControls);
 $("player").addEventListener("pointerdown",showControls);
 $("player").addEventListener("touchstart",showControls,{passive:true});
