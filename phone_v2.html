@@ -311,6 +311,7 @@ function renderReels(){
  }
  if(reelActive<0)reelActive=0;
  ensureReelWindow(reelActive);
+ if(changed)activateReel(reelActive);
 }
 function nearestReel(){
  const feed=$("reelFeed"),slides=[...feed.querySelectorAll(".reel-slide")];if(!slides.length)return;
