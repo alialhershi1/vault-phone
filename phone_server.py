@@ -300,8 +300,11 @@ def _scan_worker():
     try:
         with SCAN_LOCK:
             mode, old_newest, before = SCAN_MODE, SCAN_NEWEST, SCAN_BEFORE
+            starting_count = len(SCAN_FOUND)
+        print("library scan: started mode=%s cached_files=%s" % (mode, starting_count), flush=True)
         if mode == "incremental" and old_newest:
             newest, cursor = None, None
+            added_messages = 0
             while True:
                 msgs = _get_page(cursor)
                 if not msgs:
@@ -316,6 +319,7 @@ def _scan_worker():
                     fresh.append(msg)
                 if fresh:
                     _add_messages(fresh)
+                    added_messages += len(fresh)
                 if reached_anchor or len(msgs) < 100:
                     break
                 cursor = msgs[-1]["id"]
@@ -323,14 +327,22 @@ def _scan_worker():
                 if newest:
                     SCAN_NEWEST = newest
                 SCAN_DONE, SCAN_BEFORE, SCAN_ERROR = True, None, ""
+                final_count = len(SCAN_FOUND)
             _save_library_cache()
+            print("library scan: incremental complete new_messages=%s total_files=%s anchor_found=%s" %
+                  (added_messages, final_count, bool(reached_anchor)), flush=True)
         else:
+            first_page = True
             while True:
                 with SCAN_LOCK:
                     before = SCAN_BEFORE
                     if SCAN_DONE:
                         break
                 msgs = _get_page(before)
+                if first_page and msgs:
+                    with SCAN_LOCK:
+                        SCAN_NEWEST = msgs[0].get("id")
+                    first_page = False
                 _add_messages(msgs)
                 with SCAN_LOCK:
                     if len(msgs) < 100:
@@ -338,25 +350,42 @@ def _scan_worker():
                     else:
                         SCAN_BEFORE = msgs[-1]["id"]
                     SCAN_ERROR = ""
+                    current_count = len(SCAN_FOUND)
                 _save_library_cache()
+                print("library scan: initial page processed messages=%s files=%s" %
+                      (len(msgs), current_count), flush=True)
             _save_library_cache()
+            with SCAN_LOCK:
+                final_count = len(SCAN_FOUND)
+            print("library scan: initial complete total_files=%s newest=%s" %
+                  (final_count, bool(SCAN_NEWEST)), flush=True)
     except Exception as e:
         with SCAN_LOCK:
             SCAN_ERROR = str(e)[:300]
+        print("library scan failed: %s" % str(e)[:250], flush=True)
     finally:
         with SCAN_LOCK:
             SCAN_BUSY = False
 
 def start_scan():
-    global SCAN_BUSY, SCAN_MODE, LAST_INCREMENTAL_SCAN
+    global SCAN_BUSY, SCAN_MODE, LAST_INCREMENTAL_SCAN, SCAN_DONE, SCAN_BEFORE
     with SCAN_LOCK:
         if SCAN_BUSY:
             return
         if SCAN_DONE:
-            if not CACHE_LOADED or not SCAN_NEWEST or time.time() - LAST_INCREMENTAL_SCAN < 60:
+            if not CACHE_LOADED:
                 return
-            SCAN_MODE = "incremental"
-            LAST_INCREMENTAL_SCAN = time.time()
+            if not SCAN_NEWEST:
+                # Older saved indexes may not have an incremental anchor.
+                # Rebuild the message index once, preserving the cached metadata.
+                SCAN_DONE, SCAN_BEFORE = False, None
+                SCAN_MODE = "initial"
+                print("library scan: missing newest-message anchor; starting recovery scan", flush=True)
+            else:
+                if time.time() - LAST_INCREMENTAL_SCAN < 60:
+                    return
+                SCAN_MODE = "incremental"
+                LAST_INCREMENTAL_SCAN = time.time()
         else:
             SCAN_MODE = "initial"
         SCAN_BUSY = True
