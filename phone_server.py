@@ -414,9 +414,12 @@ def _fetch_meta(fid, f):
     r.raise_for_status()
     m = json.loads(V.KEY["aes"].decrypt(r.content[:12], r.content[12:], None))
     src = str(m.get("src") or "")
-    kind = m.get("kind") or ("instagram_reel" if "instagram.com/" in src and "/reel/" in src else "")
+    # Classify a Reel only when its original source is an Instagram Reel URL.
+    # Older cached records may contain an incorrect kind flag from the previous
+    # broad video classifier; do not trust that flag.
+    kind = "instagram_reel" if re.match(r"^https?://(?:www\\.)?instagram\\.com/reel/", src, re.I) else ""
     return {"id": fid, "name": m.get("name", "?"), "folder": m.get("folder") or "",
-            "kind": kind, "type": m.get("type") or "", "size": m.get("size", 0), "t": m.get("t", 0)}
+            "kind": kind, "src": src, "type": m.get("type") or "", "size": m.get("size", 0), "t": m.get("t", 0)}
 
 def _missing_meta(found):
     now = time.time()
@@ -424,8 +427,13 @@ def _missing_meta(found):
     with SCAN_LOCK:
         for fid, f in found.items():
             cached = META_CACHE.get(fid)
-            legacy = bool(cached and str(cached.get("folder") or "").strip().lower() == "reels"
-                          and not cached.get("kind") and fid not in LEGACY_CHECKED)
+            # Re-read old Reel classifications that lack source provenance.
+            # This repairs entries incorrectly tagged as Reels by the old classifier.
+            legacy = bool(cached and (
+                (cached.get("kind") == "instagram_reel" and not cached.get("src"))
+                or (str(cached.get("folder") or "").strip().lower() == "reels"
+                    and not cached.get("kind") and fid not in LEGACY_CHECKED)
+            ))
             if (cached is None or legacy) and now - META_FAIL.get(fid, 0) > 600:
                 out.append(fid)
     return out
