@@ -76,6 +76,16 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 .reels-upload{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .reels-upload input{max-width:100%;font-size:12px}
 #reelStatus{font-size:12px;color:#9eabb9;min-height:18px;margin:8px 0}
+.reel-link-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin:12px 0;padding:12px;background:#141b24;border:1px solid #303b49;border-radius:12px}
+.reel-link-tools textarea{width:100%;min-height:76px;resize:vertical;grid-column:1/-1;font:inherit;font-size:13px;line-height:1.5;color:#fff;background:#0d131b;border:1px solid #465366;border-radius:9px;padding:10px}
+.reel-link-tools button{margin:0;white-space:nowrap}
+#reelJobs{display:grid;gap:7px;margin:9px 0}
+.reel-job{padding:10px 11px;background:#141b24;border:1px solid #303b49;border-radius:9px;min-width:0}
+.reel-job-top{display:flex;justify-content:space-between;gap:10px;font-size:12px}
+.reel-job-title{overflow-wrap:anywhere;min-width:0}
+.reel-job-status{color:#9eabb9;white-space:nowrap}
+.reel-job progress{width:100%;height:6px;margin-top:8px;accent-color:#3b82f6}
+@media(max-width:600px){.reel-link-tools{grid-template-columns:1fr}.reel-link-tools button{width:100%}}
 #reelFeed{height:min(78dvh,900px);min-height:360px;overflow-y:auto;overscroll-behavior:contain;scroll-snap-type:y mandatory;border-radius:15px;background:#050608;scrollbar-width:none}
 #reelFeed::-webkit-scrollbar{display:none}
 .reel-slide{height:100%;min-height:360px;position:relative;display:flex;align-items:center;justify-content:center;scroll-snap-align:start;scroll-snap-stop:always;background:#050608;overflow:hidden}
@@ -121,6 +131,12 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <input id="reelFiles" type="file" accept="video/*,.mp4,.m4v,.webm,.mov,.ogv" multiple aria-label="Choose reels">
 <button id="uploadReels" type="button">Add from phone</button>
 </div></div>
+<div class="reel-link-tools">
+<textarea id="reelLinks" rows="3" placeholder="Paste public Instagram Reel links, one per line" aria-label="Instagram Reel links"></textarea>
+<button id="downloadReels" type="button">Download links to Discord</button>
+<small class="muted">Server-side download · up to 10 links per batch · public Reels only</small>
+</div>
+<div id="reelJobs" aria-live="polite"></div>
 <div id="reelStatus">Main feed: videos already stored in your server vault. Phone uploads are optional.</div>
 <div id="reelFeed"><div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div></div>
 </div>
@@ -290,6 +306,7 @@ async function load(){
 
 /* Reels feed: one active video, three ahead, one behind. */
 let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0,reelFullscreenSlide=null,reelSpeed2x=false;
+let reelJobs=[],reelJobPoll=null,reelJobRefreshBusy=false;
 const reelSpeedFrames=new WeakMap();
 function animateReelSpeed(video,target){
  const previous=reelSpeedFrames.get(video);if(previous)cancelAnimationFrame(previous);
@@ -350,7 +367,7 @@ function setVaultTab(tab){
  $("reelsTab").classList.toggle("active",reels);
  $("libraryTab").setAttribute("aria-selected",String(!reels));
  $("reelsTab").setAttribute("aria-selected",String(reels));
- if(reels){renderReels();scanReelDurations();if(reelActive<0&&reelItems.length)activateReel(0)}
+ if(reels){renderReels();scanReelDurations();refreshReelJobs();if(reelActive<0&&reelItems.length)activateReel(0)}
 }
 $("libraryTab").onclick=()=>setVaultTab("library");
 $("reelsTab").onclick=()=>setVaultTab("reels");
@@ -470,6 +487,48 @@ $("reelFeed").addEventListener("scroll",()=>{
  if(reelScrollTick)return;
  reelScrollTick=requestAnimationFrame(()=>{reelScrollTick=0;nearestReel()});
 },{passive:true});
+function renderReelJobs(){
+ const root=$("reelJobs");root.innerHTML="";
+ for(const job of reelJobs.slice(0,20)){
+  const card=document.createElement("div");card.className="reel-job";
+  const top=document.createElement("div");top.className="reel-job-top";
+  const title=document.createElement("strong");title.className="reel-job-title";title.textContent=job.title||"Instagram Reel";
+  const status=document.createElement("span");status.className="reel-job-status";status.textContent=job.status==="completed"?"Saved":job.status==="failed"?"Failed":job.status==="queued"?"Queued":job.status==="storing"?"Saving to Discord": "Downloading";
+  top.append(title,status);card.append(top);
+  const detail=document.createElement("small");detail.className="muted";detail.textContent=job.message||job.url||"";card.append(detail);
+  if(job.status!=="failed"){const bar=document.createElement("progress");bar.max=100;bar.value=Number(job.percent)||0;card.append(bar)}
+  root.append(card);
+ }
+}
+async function refreshReelJobs(){
+ if(!token||reelJobRefreshBusy)return;
+ reelJobRefreshBusy=true;
+ try{
+  const data=await(await api(auth("/api/reels/jobs"))).json();
+  const next=data.jobs||[];
+  const newlyCompleted=next.some(job=>job.status==="completed"&&!reelJobs.some(old=>old.id===job.id&&old.status==="completed"));
+  reelJobs=next;renderReelJobs();
+  const active=reelJobs.some(job=>["queued","downloading","storing"].includes(job.status));
+  if(active&&!reelJobPoll)reelJobPoll=setInterval(refreshReelJobs,2200);
+  if(!active&&reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}
+  if(newlyCompleted)await load();
+ }catch(e){
+  if(reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}
+ }finally{reelJobRefreshBusy=false}
+}
+$("downloadReels").onclick=async()=>{
+ const urls=$("reelLinks").value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+ if(!urls.length){$("reelStatus").textContent="Paste one or more Instagram Reel links first.";return}
+ if(urls.length>10){$("reelStatus").textContent="Please submit up to 10 links at a time.";return}
+ $("downloadReels").disabled=true;
+ try{
+  const data=await(await api(auth("/api/reels/download"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls})})).json();
+  $("reelLinks").value="";
+  $("reelStatus").textContent="Sent "+(data.jobs||[]).length+" link(s) to the server download queue. Your device is not downloading the videos.";
+  await refreshReelJobs();
+ }catch(e){$("reelStatus").textContent="Could not start downloads: "+e.message}
+ finally{$("downloadReels").disabled=false}
+};
 $("uploadReels").onclick=async()=>{
  if(!$("reelFiles").files.length){$("reelFiles").click();return}
  const fs=[...$("reelFiles").files].filter(f=>f.type.startsWith("video/")||/\.(mp4|m4v|webm|mov|ogv)$/i.test(f.name));
@@ -493,7 +552,7 @@ $("uploadReels").onclick=async()=>{
 $("unlock").onclick=async()=>{
  try{loginSay("Checking password…");$("unlock").disabled=true;
   const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});
-  token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();
+  token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();await refreshReelJobs();
   if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),3000);
  }catch(e){loginSay(e.message)}finally{$("unlock").disabled=false}
 };
