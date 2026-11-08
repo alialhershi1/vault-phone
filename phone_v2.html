@@ -91,7 +91,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 #status{white-space:pre-wrap;color:#93c5fd;margin-top:9px;min-height:1.3em}
 .group{border:1px solid #303b49;border-radius:10px;margin:9px 0;overflow:hidden}
 .group summary{padding:12px 13px;background:#151c25;cursor:pointer;font-weight:600;display:flex;justify-content:space-between;gap:12px}
-.group-body{padding:0 12px}.count{color:#9eabb9;font-weight:400}
+.group-body{padding:0 12px}.count{color:#9eabb9;font-weight:400}.folder-color{font-size:10px;padding:5px 6px;max-width:92px;background:#111820;border:1px solid #465366;color:#e5e7eb}.group summary .count{margin-left:auto}
 .player-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
 #playing{overflow-wrap:anywhere}.empty{padding:20px 5px;color:#9eabb9;text-align:center}
 @media(max-width:600px){body{padding:13px}.panel{padding:13px}.item{align-items:flex-start}.item-actions button{padding:9px}}
@@ -140,6 +140,13 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <script>
 let token="",pollTimer=null,loading=false,allItems=[],playQueue=[],currentIndex=-1,customGroups=[],fileGroups={};
 const $=id=>document.getElementById(id);
+const FOLDER_COLORS=[
+ {name:"Blue",value:"#3b82f6"},{name:"Red",value:"#ef4444"},
+ {name:"Green",value:"#22c55e"},{name:"Purple",value:"#a855f7"},
+ {name:"Orange",value:"#f97316"},{name:"Yellow",value:"#eab308"},
+ {name:"Pink",value:"#ec4899"},{name:"Teal",value:"#14b8a6"},
+ {name:"Cyan",value:"#06b6d4"},{name:"Slate",value:"#64748b"}
+];
 function auth(url){return url+(url.includes("?")?"&":"?")+"t="+encodeURIComponent(token)}
 async function api(url,opts={}){const r=await fetch(url,opts);if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
 function say(s){$("status").textContent=s}
@@ -217,7 +224,19 @@ function render(){
  for(const [folder,items] of groups){
   const details=document.createElement("details");details.className="group";details.open=!!q||folder==="Unsorted";
   const summary=document.createElement("summary");const label=document.createElement("span");label.textContent=folder;
-  const count=document.createElement("span");count.className="count";count.textContent=items.length+" item"+(items.length===1?"":"s");summary.append(label,count);details.append(summary);
+  const customGroup=customGroups.find(g=>g.name===folder);
+  const groupColor=customGroup?.color||"#64748b";
+  details.style.borderLeft="3px solid "+groupColor;
+  const count=document.createElement("span");count.className="count";count.textContent=items.length+" item"+(items.length===1?"":"s");
+  if(customGroup){
+   const colorPick=document.createElement("select");colorPick.className="folder-color";colorPick.setAttribute("aria-label","Color for "+folder);
+   for(const c of FOLDER_COLORS){const op=document.createElement("option");op.value=c.value;op.textContent=c.name;colorPick.append(op)}
+   colorPick.value=FOLDER_COLORS.some(c=>c.value===groupColor)?groupColor:"#64748b";
+   colorPick.addEventListener("click",e=>e.stopPropagation());
+   colorPick.onchange=async e=>{e.stopPropagation();const chosen=colorPick.value;colorPick.disabled=true;try{await api(auth("/api/groups/color"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:customGroup.id,color:chosen})});customGroup.color=chosen;details.style.borderLeftColor=chosen;say("Folder color updated and synced.")}catch(err){say("Could not update folder color: "+err.message);colorPick.value=groupColor}finally{colorPick.disabled=false}};
+   summary.append(label,colorPick,count);
+  }else summary.append(label,count);
+  details.append(summary);
   const body=document.createElement("div");body.className="group-body";
   for(const f of items){
    const row=document.createElement("div");row.className="item";const left=document.createElement("div");left.className="item-name";
