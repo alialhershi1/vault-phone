@@ -607,7 +607,17 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    # Safe operational diagnostics: never expose credentials or raw DB errors.
+    with SCAN_LOCK:
+        cache_loaded = CACHE_LOADED
+        indexed_files = len(SCAN_FOUND)
+    return {
+        "ok": True,
+        "database_configured": bool(os.environ.get("DATABASE_URL", "").strip()),
+        "database_connected": bool(Q.DURABLE),
+        "cache_loaded": cache_loaded,
+        "indexed_files": indexed_files,
+    }
 
 @app.post("/api/unlock")
 def unlock():
