@@ -746,4 +746,4 @@ $("pdfScroll").addEventListener("wheel",e=>{if(e.ctrlKey||e.metaKey){e.preventDe
 let pinchDistance=0;$("pdfScroll").addEventListener("touchmove",e=>{if(e.touches.length===2){const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(pinchDistance&&Math.abs(d/pinchDistance-1)>.04)queuePdfZoom(pdfScale*d/pinchDistance);pinchDistance=d}},{passive:true});$("pdfScroll").addEventListener("touchend",()=>pinchDistance=0,{passive:true});
 $("audioPlay").onclick=audioPlay;$("audioPause").onclick=()=>speechSynthesis.pause();$("audioBack").onclick=()=>{audioStop();audioChunkIndex=Math.max(0,audioChunkIndex-1);audioPlay()};$("audioForward").onclick=()=>{audioStop();audioChunkIndex=Math.min(audioChunks.length-1,audioChunkIndex+1);audioPlay()};if(window.speechSynthesis){loadAudioVoices();speechSynthesis.onvoiceschanged=loadAudioVoices}
 
-</body></html>
+</script></body></html>
