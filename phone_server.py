@@ -417,7 +417,7 @@ def _fetch_meta(fid, f):
     # Classify a Reel only when its original source is an Instagram Reel URL.
     # Older cached records may contain an incorrect kind flag from the previous
     # broad video classifier; do not trust that flag.
-    kind = "instagram_reel" if re.match(r"^https?://(?:www\\.)?instagram\\.com/reel/", src, re.I) else ""
+    kind = "instagram_reel" if re.match(r"^https?://(?:www\.)?instagram\.com/reel/", src, re.I) else ""
     return {"id": fid, "name": m.get("name", "?"), "folder": m.get("folder") or "",
             "kind": kind, "src": src, "type": m.get("type") or "", "size": m.get("size", 0), "t": m.get("t", 0)}
 
