@@ -172,7 +172,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 </div>
 </section>
 <script>
-let token="",pollTimer=null,loading=false,allItems=[],playQueue=[],currentIndex=-1,customGroups=[],fileGroups={};
+let token=(()=>{try{return localStorage.getItem("vt")||""}catch(e){return ""}})(),saveTok=t=>{try{t?localStorage.setItem("vt",t):localStorage.removeItem("vt")}catch(e){}},pollTimer=null,loading=false,allItems=[],playQueue=[],currentIndex=-1,customGroups=[],fileGroups={};
 const $=id=>document.getElementById(id);
 const FOLDER_COLORS=[
  {name:"Blue",value:"#3b82f6"},{name:"Red",value:"#ef4444"},
@@ -182,7 +182,7 @@ const FOLDER_COLORS=[
  {name:"Cyan",value:"#06b6d4"},{name:"Slate",value:"#64748b"}
 ];
 function auth(url){return url+(url.includes("?")?"&":"?")+"t="+encodeURIComponent(token)}
-async function api(url,opts={}){const r=await fetch(url,opts);if(r.status===403&&token){token="";if(pollTimer){clearInterval(pollTimer);pollTimer=null}loading=false;allItems=[];playQueue=[];currentIndex=-1;try{$("video").pause();$("video").removeAttribute("src");$("video").load();$("app").classList.add("hidden");$("login").classList.remove("hidden");loginSay("Your vault session expired. Enter your password to unlock again.")}catch(e){}}if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
+async function api(url,opts={}){const r=await fetch(url,opts);if(r.status===403&&token){token="";saveTok("");if(pollTimer){clearInterval(pollTimer);pollTimer=null}if(reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}loading=false;allItems=[];playQueue=[];currentIndex=-1;try{$("video").pause();$("video").removeAttribute("src");$("video").load();$("app").classList.add("hidden");$("login").classList.remove("hidden");loginSay("Your vault session expired. Enter your password to unlock again.")}catch(e){}}if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
 function say(s){$("status").textContent=s}
 function loginSay(s){$("loginStatus").textContent=s}
 function folderName(f){return (f.folder||"").replace(/^\/+|\/+$/g,"")||"Unsorted"}
@@ -323,7 +323,7 @@ function setReelSpeed(enabled){
 const reelDurationCache=new Map();
 const REEL_BATCH_SIZE=10;
 let reelDurationScanRunning=false,reelCandidateList=[],reelCandidateCursor=0,reelCandidateKey="",reelShuffle=false,reelLoadTarget=10;
-function isReel(f){const d=reelDurationCache.get(f?.id);return !!(f&&f.ok&&isVideo(f)&&Number.isFinite(d)&&d>0&&d<900)}
+function isReel(f){return !!(f&&f.ok&&isVideo(f)&&(f.folder==="Reels"||(Number(f.size)||0)<=120*1024*1024))}
 function shuffleList(list){
  const out=[...list];
  for(let i=out.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[out[i],out[j]]=[out[j],out[i]]}
@@ -332,59 +332,17 @@ function shuffleList(list){
 function prepareReelCandidates(){
  const base=allItems.filter(f=>f.ok&&isVideo(f)).sort((a,b)=>(b.t||0)-(a.t||0));
  const key=base.map(f=>f.id).join("|");
- if(key!==reelCandidateKey){
-  const priorIds=new Set(reelCandidateList.map(f=>f.id));
-  const present=new Set(base.map(f=>f.id));
-  reelCandidateKey=key;
-  if(reelShuffle&&reelCandidateList.length){
-   reelCandidateList=reelCandidateList.filter(f=>present.has(f.id)).concat(shuffleList(base.filter(f=>!priorIds.has(f.id))));
-  }else reelCandidateList=reelShuffle?shuffleList(base):base;
-  reelCandidateCursor=0;
-  while(reelCandidateCursor<reelCandidateList.length&&reelDurationCache.has(reelCandidateList[reelCandidateCursor].id))reelCandidateCursor++;
+ if(key===reelCandidateKey)return;
+ reelCandidateKey=key;
+ if(!reelCandidateList.length){reelCandidateList=reelShuffle?shuffleList(base):base}
+ else{
+  const present=new Set(base.map(f=>f.id)),prior=new Set(reelCandidateList.map(f=>f.id));
+  const fresh=base.filter(f=>!prior.has(f.id));
+  reelCandidateList=reelCandidateList.filter(f=>present.has(f.id)).concat(reelShuffle?shuffleList(fresh):fresh);
  }
+ reelCandidateCursor=reelCandidateList.length;
 }
-async function scanReelDurations(initial=false){
- if(reelDurationScanRunning)return;
- prepareReelCandidates();
- if(!initial&&reelItems.length-reelActive>3)return;
- const batch=[];
- while(reelCandidateCursor<reelCandidateList.length&&batch.length<REEL_BATCH_SIZE){
-  const f=reelCandidateList[reelCandidateCursor++];
-  if(!reelDurationCache.has(f.id))batch.push(f);
- }
- if(!batch.length){renderReels();return}
- reelDurationScanRunning=true;
- $("reelStatus").textContent="Loading the next "+batch.length+" Reels…";
- try{
-  let cursor=0;
-  async function worker(){
-   while(cursor<batch.length){
-    const f=batch[cursor++];
-    const v=document.createElement("video");
-    v.preload="metadata";v.muted=true;v.src=auth("/api/stream/"+encodeURIComponent(f.id));
-    try{
-     const duration=await new Promise(resolve=>{
-      let settled=false;
-      const finish=value=>{if(settled)return;settled=true;clearTimeout(timer);resolve(value)};
-      const timer=setTimeout(()=>finish(null),12000);
-      v.addEventListener("loadedmetadata",()=>finish(Number.isFinite(v.duration)?v.duration:null),{once:true});
-      v.addEventListener("error",()=>finish(null),{once:true});
-      v.load();
-     });
-     reelDurationCache.set(f.id,duration!==null&&duration>0?duration:Infinity);
-    }finally{v.pause();v.removeAttribute("src");v.load()}
-   }
-  }
-  await Promise.all([worker(),worker(),worker()]);
- }finally{
-  reelDurationScanRunning=false;
-  renderReels();
-  if($("reelsPanel")&&!$("reelsPanel").classList.contains("hidden")){
-   if(reelActive<0&&reelItems.length)activateReel(0);
-   if(reelItems.length<reelLoadTarget&&reelCandidateCursor<reelCandidateList.length)scanReelDurations(true);
-  }
- }
-}
+function scanReelDurations(){prepareReelCandidates();renderReels()}
 function setVaultTab(tab){
  const reels=tab==="reels";
  $("libraryTools").classList.toggle("hidden",reels);
@@ -395,7 +353,8 @@ function setVaultTab(tab){
  $("reelsTab").classList.toggle("active",reels);
  $("libraryTab").setAttribute("aria-selected",String(!reels));
  $("reelsTab").setAttribute("aria-selected",String(reels));
- if(reels){renderReels();if(!reelItems.length)scanReelDurations(true);refreshReelJobs();if(reelActive<0&&reelItems.length)activateReel(0)}
+ if(reels){renderReels();refreshReelJobs();if(reelActive<0&&reelItems.length)activateReel(0);requestAnimationFrame(()=>{const f=$("reelFeed");if(reelActive>=0&&f.clientHeight)f.scrollTop=reelActive*f.clientHeight;const n=reelNodes.get(reelActive);if(n)n.querySelector("video").play().catch(()=>{})})}
+ else{for(const n of reelNodes.values())n.querySelector("video").pause()}
 }
 $("libraryTab").onclick=()=>setVaultTab("library");
 $("reelsTab").onclick=()=>setVaultTab("reels");
@@ -429,21 +388,22 @@ function makeReelNode(item,index){
  actions.append(fullscreen,speed,play);overlay.append(name,actions);slide.append(video,overlay);
  return slide;
 }
+function reelShell(i){const a=document.createElement("article");a.className="reel-slide";a.dataset.index=String(i);return a}
+function releaseReelVideo(v){v.pause();if(v.getAttribute("src")){v.removeAttribute("src");v.load()}}
 function ensureReelWindow(center){
- const feed=$("reelFeed"),lo=Math.max(0,center-3),hi=Math.min(reelItems.length-1,center+2);
+ const feed=$("reelFeed"),lo=Math.max(0,center-1),hi=Math.min(reelItems.length-1,center+2);
  for(let i=lo;i<=hi;i++){
   if(!reelNodes.has(i)){
-   const node=makeReelNode(reelItems[i],i);reelNodes.set(i,node);
-   const next=[...reelNodes.keys()].filter(k=>k>i).sort((a,b)=>a-b)[0];
-   if(next!==undefined)feed.insertBefore(node,reelNodes.get(next));else feed.append(node);
+   const shell=feed.children[i];if(!shell)continue;
+   const node=makeReelNode(reelItems[i],i);shell.replaceWith(node);reelNodes.set(i,node);
   }
   const v=reelNodes.get(i).querySelector("video");
-  if(i===center&&!v.src){v.preload="auto";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}
-  else if(i===center+1&&!v.src){v.preload="metadata";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}
-  else if(i!==center&&i!==center+1){v.preload="none";if(v.src){v.removeAttribute("src");v.load()}}
+  if(i===center){if(!v.getAttribute("src")){v.preload="auto";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}}
+  else if(i===center+1){if(!v.getAttribute("src")){v.preload="metadata";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}}
+  else releaseReelVideo(v);
  }
  for(const [i,node] of [...reelNodes.entries()]){
-  if(i<lo||i>hi){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load();node.remove();reelNodes.delete(i)}
+  if(i<lo||i>hi){releaseReelVideo(node.querySelector("video"));node.replaceWith(reelShell(i));reelNodes.delete(i)}
  }
 }
 function activateReel(index){
@@ -482,56 +442,54 @@ document.addEventListener("fullscreenchange",syncReelFullscreen);
 document.addEventListener("webkitfullscreenchange",syncReelFullscreen);
 function renderReels(){
  prepareReelCandidates();
- const previousId=reelItems[reelActive]?.id||"";
+ const feed=$("reelFeed"),previousId=reelItems[reelActive]?.id||"";
  const nextItems=reelCandidateList.filter(isReel);
- const changed=nextItems.length!==reelItems.length||nextItems.some((x,i)=>x.id!==reelItems[i]?.id);
  const appendOnly=nextItems.length>=reelItems.length&&reelItems.every((x,i)=>nextItems[i]?.id===x.id);
- const rebuild=changed&&!appendOnly;
- const needsActivation=reelActive<0&&nextItems.length>0;
- reelItems=nextItems;
- $("reelCount").textContent=reelItems.length?" · "+reelItems.length+(reelCandidateCursor<reelCandidateList.length?" loaded":""):"";
+ const shellsOk=feed.children.length===reelItems.length&&!!feed.querySelector(".reel-slide");
+ $("reelCount").textContent=nextItems.length?" · "+nextItems.length:"";
+ if(appendOnly&&shellsOk&&nextItems.length===reelItems.length)return;
+ const oldLen=reelItems.length;reelItems=nextItems;
  if(!reelItems.length){
-  for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
+  for(const node of reelNodes.values())releaseReelVideo(node.querySelector("video"));
   reelNodes.clear();
-  $("reelFeed").innerHTML='<div class="reel-empty">'+(reelCandidateList.length?'Loading your first 10 Reels…':'No videos are available in your vault yet.')+'</div>';
-  if(!reelDurationScanRunning&&reelCandidateCursor<reelCandidateList.length)$("reelStatus").textContent="Preparing the first 12 Reels…";
-  else if(!reelCandidateList.length)$("reelStatus").textContent="No videos found in your server vault.";
+  feed.innerHTML='<div class="reel-empty">'+(allItems.length?'No Reels in your vault yet.':'Loading your vault…')+'</div>';
   reelActive=-1;return;
  }
- if(rebuild){
-  for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
-  reelNodes.clear();$("reelFeed").innerHTML="";
-  reelActive=previousId?reelItems.findIndex(x=>x.id===previousId):-1;
+ if(appendOnly&&shellsOk){
+  const frag=document.createDocumentFragment();
+  for(let i=oldLen;i<reelItems.length;i++)frag.append(reelShell(i));
+  feed.append(frag);
+  if(reelActive<0){reelActive=0;ensureReelWindow(0);activateReel(0)}
+  return;
  }
- if(reelActive<0)reelActive=0;
- ensureReelWindow(reelActive);
- if(rebuild||needsActivation)activateReel(reelActive);
+ for(const node of reelNodes.values())releaseReelVideo(node.querySelector("video"));
+ reelNodes.clear();feed.innerHTML="";
+ const frag=document.createDocumentFragment();
+ for(let i=0;i<reelItems.length;i++)frag.append(reelShell(i));
+ feed.append(frag);
+ reelActive=previousId?Math.max(0,reelItems.findIndex(x=>x.id===previousId)):0;
+ if(feed.clientHeight)feed.scrollTop=reelActive*feed.clientHeight;
+ ensureReelWindow(reelActive);activateReel(reelActive);
 }
 function nearestReel(){
- const feed=$("reelFeed"),slides=[...feed.querySelectorAll(".reel-slide")];if(!slides.length)return;
- const mid=feed.getBoundingClientRect().top+feed.clientHeight/2;
- let best=slides[0],dist=Infinity;
- for(const slide of slides){const r=slide.getBoundingClientRect(),d=Math.abs((r.top+r.bottom)/2-mid);if(d<dist){best=slide;dist=d}}
- const idx=Number(best.dataset.index);if(Number.isInteger(idx)&&idx!==reelActive)activateReel(idx);
+ const feed=$("reelFeed");if(!reelItems.length||!feed.clientHeight)return;
+ const idx=Math.max(0,Math.min(reelItems.length-1,Math.round(feed.scrollTop/feed.clientHeight)));
+ if(idx!==reelActive)activateReel(idx);
 }
 $("reelFeed").addEventListener("scroll",()=>{
  if(reelScrollTick)return;
- reelScrollTick=requestAnimationFrame(()=>{
-  reelScrollTick=0;nearestReel();
-  if(reelItems.length-reelActive<=3&&reelCandidateCursor<reelCandidateList.length){reelLoadTarget=Math.max(reelLoadTarget,reelItems.length+10);scanReelDurations(true)}
- });
+ reelScrollTick=requestAnimationFrame(()=>{reelScrollTick=0;nearestReel()});
 },{passive:true});
+window.addEventListener("resize",()=>{const f=$("reelFeed");if(reelActive>=0&&f.clientHeight&&!$("reelsPanel").classList.contains("hidden"))f.scrollTop=reelActive*f.clientHeight});
 $("shuffleReels").onclick=()=>{
  reelShuffle=!reelShuffle;
  $("shuffleReels").textContent=reelShuffle?"Shuffle: On":"Shuffle";
  $("shuffleReels").classList.toggle("speed-active",reelShuffle);
- for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
- reelCandidateList=[];reelCandidateKey="";reelCandidateCursor=0;reelLoadTarget=10;
- prepareReelCandidates();
+ for(const node of reelNodes.values())releaseReelVideo(node.querySelector("video"));
+ reelCandidateList=[];reelCandidateKey="";
  reelNodes.clear();$("reelFeed").innerHTML="";
  reelActive=-1;reelItems=[];
  renderReels();
- if(reelCandidateCursor<reelCandidateList.length)scanReelDurations(true);
 };
 function renderReelJobs(){
  const root=$("reelJobs");root.innerHTML="";
@@ -554,7 +512,7 @@ async function refreshReelJobs(){
   const next=data.jobs||[],summary=data.summary||{};
   const newlyCompleted=next.some(job=>job.status==="completed"&&!reelJobs.some(old=>old.id===job.id&&old.status==="completed"));
   reelJobs=next;renderReelJobs();
-  if(summary.total!==undefined)$("reelStatus").textContent="Reel downloads · "+summary.completed+" saved · "+summary.failed+" failed · "+summary.active+" remaining · "+summary.total+" submitted";
+  if(summary.total!==undefined)$("reelStatus").textContent="Reel downloads · "+summary.total+" submitted · "+summary.completed+" saved · "+summary.failed+" failed · "+summary.queued+" queued · "+summary.downloading+" downloading"+(summary.storing?" · "+summary.storing+" storing":"")+" · "+summary.remaining+" remaining"+(summary.durable===false?" · ⚠ queue not persistent (no database)":"");
   const active=Number(summary.active||0)>0||next.some(job=>["queued","downloading","storing"].includes(job.status));
   if(active&&!reelJobPoll)reelJobPoll=setInterval(refreshReelJobs,2200);
   if(!active&&reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}
@@ -570,18 +528,26 @@ function extractInstagramReelLinks(raw){
 }
 $("downloadReels").onclick=async()=>{
  const raw=$("reelLinks").value;
+ const all=[...String(raw||"").matchAll(/https?:\/\/(?:(?:www|m)\.)?instagram\.com\/(?:[^\/\s"'<>]+\/)?(?:reel|reels)\/[A-Za-z0-9_-]+/gi)].length;
  const urls=extractInstagramReelLinks(raw);
  if(!urls.length){$("reelStatus").textContent="I couldn't find Instagram Reel URLs in that text. Paste the full https://www.instagram.com/reel/… links or the exported JSON/HTML contents.";return}
- $("reelStatus").textContent="Found "+urls.length+" unique Reel links. Sending them to the server queue…";
  $("downloadReels").disabled=true;
+ const t={added:0,requeued:0,duplicates:0,invalid:0},step=500;let sent=0,failedChunk="";
  try{
-  const data=await(await api(auth("/api/reels/download"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls})})).json();
+  for(let i=0;i<urls.length;i+=step){
+   $("reelStatus").textContent="Sending "+Math.min(i+step,urls.length)+" / "+urls.length+" links to the server queue…";
+   const d=await(await api(auth("/api/reels/download"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls:urls.slice(i,i+step)})})).json();
+   for(const k in t)t[k]+=d[k]||0;sent=Math.min(i+step,urls.length);
+   await new Promise(r=>setTimeout(r,0));
+  }
   $("reelLinks").value="";
-  $("reelStatus").textContent="Sent "+(data.jobs||[]).length+" link(s) to the server download queue. Your device is not downloading the videos.";
-  await refreshReelJobs();
- }catch(e){$("reelStatus").textContent="Could not start downloads: "+e.message}
- finally{$("downloadReels").disabled=false}
+ }catch(e){failedChunk=" Stopped after "+sent+" of "+urls.length+" links ("+e.message+"). Paste again: links already queued are detected as duplicates."}
+ const pasteDups=Math.max(0,all-urls.length);
+ $("reelStatus").textContent="Queued "+t.added+" new · "+t.duplicates+" already in the queue/vault"+(t.requeued?" · "+t.requeued+" failed ones re-queued":"")+(pasteDups?" · "+pasteDups+" repeated in your paste":"")+(t.invalid?" · "+t.invalid+" rejected as invalid":"")+". Your device is not downloading the videos."+failedChunk;
+ $("downloadReels").disabled=false;
+ try{await refreshReelJobs()}catch(e){}
 };
+if(!$("retryFailedReels")){const b=document.createElement("button");b.id="retryFailedReels";b.className="secondary";b.textContent="Retry failed";b.onclick=async()=>{try{const d=await(await api(auth("/api/reels/retry_failed"),{method:"POST"})).json();$("reelStatus").textContent="Re-queued "+d.requeued+" failed Reel(s).";await refreshReelJobs()}catch(e){$("reelStatus").textContent=e.message}};$("downloadReels").insertAdjacentElement("afterend",b)}
 $("uploadReels").onclick=async()=>{
  if(!$("reelFiles").files.length){$("reelFiles").click();return}
  const fs=[...$("reelFiles").files].filter(f=>f.type.startsWith("video/")||/\.(mp4|m4v|webm|mov|ogv)$/i.test(f.name));
@@ -605,7 +571,7 @@ $("uploadReels").onclick=async()=>{
 $("unlock").onclick=async()=>{
  try{loginSay("Checking password…");$("unlock").disabled=true;
   const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});
-  token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();await refreshReelJobs();
+  token=(await r.json()).t;saveTok(token);$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();await refreshReelJobs();
   if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),3000);
  }catch(e){loginSay(e.message)}finally{$("unlock").disabled=false}
 };
@@ -684,7 +650,7 @@ $("video").addEventListener("ended",()=>moveQueue(1));
 $("speed").onchange=()=>{vid.playbackRate=Number($("speed").value)};
 $("lock").onclick=async()=>{
  try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}
- token="";if(pollTimer)clearInterval(pollTimer);pollTimer=null;
+ token="";saveTok("");if(pollTimer)clearInterval(pollTimer);pollTimer=null;if(reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null};
  $("video").pause();$("video").removeAttribute("src");$("video").querySelectorAll("track").forEach(t=>t.remove());if(subtitleObjectUrl){URL.revokeObjectURL(subtitleObjectUrl);subtitleObjectUrl=""}$("video").load();$("captionMenu").innerHTML="";
  allItems=[];playQueue=[];currentIndex=-1;for(const node of reelNodes.values()){const rv=node.querySelector("video");rv.pause();rv.removeAttribute("src");rv.load()}reelNodes.clear();reelItems=[];reelActive=-1;$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";loginSay("Vault locked.")
 };
@@ -729,4 +695,5 @@ $("pdfScroll").addEventListener("wheel",e=>{if(e.ctrlKey||e.metaKey){e.preventDe
 let pinchDistance=0;$("pdfScroll").addEventListener("touchmove",e=>{if(e.touches.length===2){const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(pinchDistance&&Math.abs(d/pinchDistance-1)>.04)queuePdfZoom(pdfScale*d/pinchDistance);pinchDistance=d}},{passive:true});$("pdfScroll").addEventListener("touchend",()=>pinchDistance=0,{passive:true});
 $("audioPlay").onclick=audioPlay;$("audioPause").onclick=()=>speechSynthesis.pause();$("audioBack").onclick=()=>{audioStop();audioChunkIndex=Math.max(0,audioChunkIndex-1);audioPlay()};$("audioForward").onclick=()=>{audioStop();audioChunkIndex=Math.min(audioChunks.length-1,audioChunkIndex+1);audioPlay()};if(window.speechSynthesis){loadAudioVoices();speechSynthesis.onvoiceschanged=loadAudioVoices}
 
+if(token){$("login").classList.add("hidden");$("app").classList.remove("hidden");(async()=>{try{await load();await refreshReelJobs();if(token){if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),3000)}}catch(e){}})()}
 </script></body></html>

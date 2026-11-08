@@ -14,7 +14,8 @@ S = requests.Session()
 S.headers.update({"Authorization": "Bot " + TOKEN, "User-Agent": "VaultPhone/1.0"})
 CHUNK = 9 * 1024 * 1024
 CACHE_MAX = 50 * 1024 * 1024
-KEY = {"aes": None, "token": None}
+KEY = {"aes": None, "raw": None}
+AUTH_CHECK = lambda: False  # set by phone_server (stateless token check)
 _cache, _cache_bytes = OrderedDict(), 0
 _clock = threading.Lock()
 _inflight = {}
@@ -23,8 +24,16 @@ _files, _flock = {}, threading.Lock()
 def dc(method, path, **kw):
     # Discord rate limits channel-history pagination. Respect both the HTTP
     # Retry-After header and JSON retry_after, and allow longer cooldowns.
+    errs = 0
     for attempt in range(30):
-        r = S.request(method, API + path, timeout=300, **kw)
+        try:
+            r = S.request(method, API + path, timeout=300, **kw)
+        except (requests.ConnectionError, requests.Timeout):
+            errs += 1
+            if errs > 4: raise
+            time.sleep(2 ** errs); continue
+        if r.status_code >= 500 and errs < 4:
+            errs += 1; time.sleep(2 ** errs); continue
         if r.status_code == 429:
             try:
                 body = r.json()
@@ -110,7 +119,7 @@ def get_chunk(fid, idx):
 
 def stream(fid):
     import secrets
-    if not KEY["aes"] or not secrets.compare_digest(request_token(), KEY["token"] or "x"): abort(403)
+    if not AUTH_CHECK(): abort(403)
     info = get_info(fid)
     size = info["size"]
     if size <= 0: return Response(b"", mimetype=info["type"] or "application/octet-stream")

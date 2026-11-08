@@ -1,0 +1,1045 @@
+From 45b13b588c788c49d986cda132bc510ff15123ef Mon Sep 17 00:00:00 2001
+From: claude <c@x>
+Date: Sun, 8 Nov 2026 16:01:04 +0000
+Subject: [PATCH 1/2] Stateless sessions, durable Reel queue (2 workers,
+ retries), batch UI counts
+
+---
+ .gitignore       |   1 +
+ phone_server.py  | 392 ++++++++++++++++++++++++++++++-----------------
+ phone_v2.html    |  31 ++--
+ reel_queue.py    | 154 +++++++++++++++++++
+ requirements.txt |   1 +
+ vault_server.py  |  15 +-
+ 6 files changed, 436 insertions(+), 158 deletions(-)
+ create mode 100644 .gitignore
+ create mode 100644 reel_queue.py
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..c18dd8d
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++__pycache__/
+diff --git a/phone_server.py b/phone_server.py
+index 9785101..f38ce3d 100644
+--- a/phone_server.py
++++ b/phone_server.py
+@@ -1,13 +1,15 @@
+ """Phone interface for the encrypted Discord vault. Runs behind Render's HTTPS proxy."""
+-import datetime, ipaddress, json, mimetypes, os, re, secrets, socket, tempfile, threading, time
++import base64, datetime, ipaddress, json, random, mimetypes, os, re, secrets, socket, tempfile, threading, time
+ from concurrent.futures import ThreadPoolExecutor
+ from urllib.parse import quote, urlparse
+ import requests
+ from cryptography.hazmat.primitives.hashes import SHA256
+ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
++from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+ from flask import Flask, abort, jsonify, request, send_from_directory
+ import vault_server as V
++import reel_queue as Q
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))
+ PORT = int(os.environ.get("PORT", "10000"))
+@@ -27,29 +29,82 @@ UPLOADS = {}
+ GROUP_RECORDS = {}
+ ASSIGN_RECORDS = {}
+ 
+-# Instagram Reel downloads run on the server; the browser sends URLs only.
+-_REEL_JOBS = {}
+-_REEL_JOB_LOCK = threading.RLock()
+-_REEL_EXECUTOR = ThreadPoolExecutor(max_workers=2)
++# ---------------------------------------------------------------------------
++# Stateless sessions: the token is an AES-GCM blob (key wrapped with a server
++# secret + expiry). Any instance, and any restart, can validate it. The vault
++# password check / PBKDF2 derivation is unchanged.
++# ---------------------------------------------------------------------------
++SESSION_TTL = 30 * 86400
++_WRAP = AESGCM(HKDF(SHA256(), 32, None, b"vault-phone-session-v1").derive(
++    (os.environ.get("SESSION_SECRET") or V.TOKEN).encode()))
++
++def make_token(raw_key, ttl=SESSION_TTL):
++    iv = os.urandom(12)
++    body = json.dumps({"e": int(time.time()) + ttl, "k": raw_key.hex()}).encode()
++    return base64.urlsafe_b64encode(iv + _WRAP.encrypt(iv, body, None)).decode().rstrip("=")
++
++def read_token(tok):
++    try:
++        blob = base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4))
++        d = json.loads(_WRAP.decrypt(blob[:12], blob[12:], None))
++        return bytes.fromhex(d["k"]) if d["e"] > time.time() else None
++    except Exception:
++        return None
++
++def _set_key(raw):
++    if V.KEY.get("raw") != raw:
++        V.KEY["aes"], V.KEY["raw"] = AESGCM(raw), raw
++        _persist_worker_key(raw)
++    _WAKE.set()
++
++def authed():
++    raw = read_token(request.args.get("t", "") or request.headers.get("X-Vault-Token", ""))
++    if not raw:
++        return False
++    _set_key(raw)
++    return True
++V.AUTH_CHECK = authed
++
++# Reel downloads: a durable queue (reel_queue.py) drained by exactly 2 workers.
+ _REEL_MAX_BYTES = 500 * 1024 * 1024
++_WAKE = threading.Event()
++_IG = {"cool": 0.0}
++_PERSISTED = {"raw": None}
++MAX_ATTEMPTS = 5
++BATCH_MAX = 1000
++_THROTTLE = ("empty media response", "rate-limit", "rate limit", "429", "too many requests", "not granting access")
++_PERMANENT = ("private", "login required", "unavailable", "removed", "does not exist", "not found", "404", "age-restricted", "exceeds the 500")
++
++def _persist_worker_key(raw):
++    """Lets queued downloads resume after a restart without anyone unlocking.
++    Stored wrapped (needs this server's env secret). Disable: WORKER_KEY_PERSIST=0."""
++    if not Q.DURABLE or os.environ.get("WORKER_KEY_PERSIST", "1") == "0" or _PERSISTED["raw"] == raw:
++        return
++    try:
++        Q.kv_set("worker_key", make_token(raw, 365 * 86400))
++        _PERSISTED["raw"] = raw
++    except Exception:
++        pass
+ 
+-def _reel_job_update(job_id, **values):
+-    with _REEL_JOB_LOCK:
+-        job = _REEL_JOBS.get(job_id)
+-        if job:
+-            job.update(values, updated=time.time())
++def _load_worker_key():
++    if not Q.DURABLE or os.environ.get("WORKER_KEY_PERSIST", "1") == "0":
++        return
++    try:
++        raw = read_token(Q.kv_get("worker_key") or "")
++        if raw:
++            V.KEY["aes"], V.KEY["raw"] = AESGCM(raw), raw
++            _PERSISTED["raw"] = raw
++    except Exception:
++        pass
+ 
+ def _valid_instagram_reel_url(raw):
+     try:
+         parsed = urlparse(str(raw).strip())
+         host = (parsed.hostname or "").lower()
+-        if parsed.scheme != "https" or host not in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
+-            return None
+-        if parsed.port not in (None, 443) or parsed.username or parsed.password:
+-            return None
+-        if not (parsed.path.startswith("/reel/") or parsed.path.startswith("/reels/")):
++        if parsed.scheme not in ("http", "https") or host not in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
+             return None
+-        return "https://www.instagram.com" + parsed.path.rstrip("/") + "/"
++        m = re.match(r"^/(?:[^/]+/)?(?:reel|reels)/([A-Za-z0-9_-]+)", parsed.path)
++        return "https://www.instagram.com/reel/" + m.group(1) + "/" if m else None
+     except Exception:
+         return None
+ 
+@@ -60,164 +115,204 @@ def _safe_reel_filename(title, extension):
+     ext = re.sub(r"[^a-z0-9]", "", str(extension or "mp4").lower())[:8] or "mp4"
+     return base + "." + ext
+ 
+-def _store_downloaded_reel(path, filename, job_id):
++def _store_downloaded_reel(path, filename, job_id, src_url):
+     size = os.path.getsize(path)
+     if size <= 0 or size > _REEL_MAX_BYTES:
+         raise RuntimeError("The downloaded video is empty or exceeds the 500 MB limit.")
+     mime = mimetypes.guess_type(filename)[0] or "video/mp4"
+     fid = secrets.token_hex(6)
+     n = max(1, (size + V.CHUNK - 1) // V.CHUNK)
+-    meta = {"name": filename, "folder": "Reels", "type": mime, "size": size,
+-            "t": int(time.time() * 1000)}
+-    created_ids = []
+-    response = V.dc("POST", f"/channels/{V.CH}/messages",
+-                    data={"content": f"v1 {fid} m {n}"},
+-                    files={"files[0]": (f"m{fid}.bin", seal(json.dumps(meta).encode()))})
+-    created_ids.append(response.json().get("id"))
+-    with SCAN_LOCK:
+-        SCAN_FOUND[fid] = {"meta": response.json()["attachments"][0]["url"],
+-                           "chunks": {}, "n": n, "message_ids": list(created_ids)}
+-        META_CACHE[fid] = {"id": fid, "name": filename, "folder": "Reels",
+-                           "type": mime, "size": size, "t": meta["t"]}
++    t = int(time.time() * 1000)
++    meta = {"name": filename, "folder": "Reels", "type": mime, "size": size, "t": t, "src": src_url}
++    created_ids, last_url, ok = [], None, False
+     try:
+-        sent = 0
++        # Chunks first, meta LAST: the library only lists an entry once it is complete.
++        sent, chunk_urls = 0, {}
+         with open(path, "rb") as source:
+             for index in range(n):
+                 chunk = source.read(V.CHUNK)
+                 if not chunk:
+                     raise RuntimeError("The temporary video file ended unexpectedly.")
+-                response = V.dc("POST", f"/channels/{V.CH}/messages",
+-                                data={"content": f"v1 {fid} c{index} {n}"},
+-                                files={"files[0]": (f"{fid}.{index}.bin", seal(chunk))})
+-                message = response.json()
+-                created_ids.append(message.get("id"))
+-                with SCAN_LOCK:
+-                    if fid in SCAN_FOUND:
+-                        SCAN_FOUND[fid]["chunks"][index] = message["attachments"][0]["url"]
+-                        SCAN_FOUND[fid]["message_ids"].append(message.get("id"))
++                msg = V.dc("POST", f"/channels/{V.CH}/messages", data={"content": f"v1 {fid} c{index} {n}"},
++                           files={"files[0]": (f"{fid}.{index}.bin", seal(chunk))}).json()
++                created_ids.append(msg.get("id"))
++                chunk_urls[index] = msg["attachments"][0]["url"]
+                 sent += len(chunk)
+-                _reel_job_update(job_id, status="storing", percent=80 + int(20 * sent / size),
+-                                 message=f"Sending to Discord · {index + 1}/{n} parts")
++                Q.update(job_id, status="storing", percent=80 + int(18 * sent / size),
++                         message=f"Sending to Discord · {index + 1}/{n} parts")
++        # Verify the last chunk is really retrievable before calling this a success.
++        probe = requests.get(chunk_urls[n - 1], headers={"Range": "bytes=0-15"}, timeout=60)
++        if probe.status_code not in (200, 206):
++            raise RuntimeError("Discord stored the video but could not read it back (%s)." % probe.status_code)
++        msg = V.dc("POST", f"/channels/{V.CH}/messages", data={"content": f"v1 {fid} m {n}"},
++                   files={"files[0]": (f"m{fid}.bin", seal(json.dumps(meta).encode()))}).json()
++        created_ids.append(msg.get("id"))
++        with SCAN_LOCK:
++            SCAN_FOUND[fid] = {"meta": msg["attachments"][0]["url"], "chunks": chunk_urls, "n": n,
++                               "message_ids": list(created_ids)}
++            META_CACHE[fid] = {"id": fid, "name": filename, "folder": "Reels", "type": mime, "size": size, "t": t}
+         with _lock:
+             LIB.update(t=0, items=[])
++        ok = True
+         return fid
+-    except Exception:
+-        for message_id in created_ids:
+-            if message_id:
+-                try:
+-                    V.dc("DELETE", f"/channels/{V.CH}/messages/{message_id}")
+-                except Exception:
+-                    pass
+-        with SCAN_LOCK:
+-            SCAN_FOUND.pop(fid, None)
+-            META_CACHE.pop(fid, None)
+-        raise
+-
+-def _run_reel_jobs(job_ids):
++    finally:
++        if not ok:
++            for mid in created_ids:
++                if mid:
++                    try:
++                        V.dc("DELETE", f"/channels/{V.CH}/messages/{mid}")
++                    except Exception:
++                        pass
++
++def _friendly(msg):
++    low = msg.lower()
++    if "empty media response" in low or any(k in low for k in _THROTTLE[1:]):
++        return "Instagram refused the request (rate limit, private post, or login needed)."
++    if "private" in low or "login required" in low:
++        return "This Reel is not publicly downloadable."
++    return msg.replace("ERROR: ", "")[:200]
++
++def _handle_failure(job, exc):
++    raw = str(exc).strip() or "Download failed."
++    low = raw.lower()
++    throttled = any(k in low for k in _THROTTLE)
++    permanent = (not throttled) and any(k in low for k in _PERMANENT)
++    attempts = int(job.get("attempts") or 1)
++    if throttled:
++        _IG["cool"] = time.time() + min(900, 90 * attempts)  # both workers back off
++    if not permanent and attempts < MAX_ATTEMPTS:
++        delay = min(1800, 30 * 2 ** (attempts - 1)) + random.uniform(0, 10)
++        Q.update(job["id"], status="queued", next_try=time.time() + delay, percent=0,
++                 message=f"Retry {attempts}/{MAX_ATTEMPTS - 1} in {int(delay)}s · {_friendly(raw)[:110]}")
++    else:
++        Q.update(job["id"], status="failed", message=_friendly(raw))
++
++def _process(job):
++    import shutil, yt_dlp
++    jid = job["id"]
++    if job.get("file_id"):  # already stored on an earlier attempt: never download twice
++        Q.update(jid, status="completed", percent=100, message="Saved in your Discord Vault · Reels")
++        return
++    temp_dir = tempfile.mkdtemp(prefix="vault-reel-")
++    last = [0.0]
+     try:
+-        import yt_dlp
++        def progress(d):
++            now = time.time()
++            if d.get("status") == "downloading" and now - last[0] > 2:
++                last[0] = now
++                tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
++                pct = min(79, int((d.get("downloaded_bytes") or 0) * 79 / tot)) if tot else 1
++                Q.update(jid, percent=pct, message="Downloading from Instagram · " + (str(d.get("_percent_str", "")).strip() or "working"))
++        options = {"format": "best[ext=mp4]/best", "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
++                   "noplaylist": True, "quiet": True, "no_warnings": True, "restrictfilenames": True,
++                   "socket_timeout": 30, "retries": 2, "fragment_retries": 2, "extractor_retries": 1,
++                   "max_filesize": _REEL_MAX_BYTES, "progress_hooks": [progress]}
++        cookies = os.environ.get("IG_COOKIES", "").strip()
++        if cookies:
++            cf = os.path.join(temp_dir, "cookies.txt")
++            with open(cf, "w") as fh:
++                fh.write(cookies + "\n")
++            options["cookiefile"] = cf
++        with yt_dlp.YoutubeDL(options) as dl:
++            info = dl.extract_info(job["url"], download=True)
++            if not info:
++                raise RuntimeError("Instagram did not provide a downloadable video.")
++            filepath = dl.prepare_filename(info)
++        if not os.path.isfile(filepath):
++            cands = [os.path.join(temp_dir, x) for x in os.listdir(temp_dir) if x != "cookies.txt"]
++            cands = [p for p in cands if os.path.isfile(p)]
++            if not cands:
++                raise RuntimeError("The downloaded video file was not found.")
++            filepath = cands[0]
++        filename = _safe_reel_filename(info.get("title") or info.get("id"), os.path.splitext(filepath)[1].lstrip("."))
++        Q.update(jid, status="storing", percent=80, title=filename, message="Encrypting and sending video to Discord…")
++        fid = _store_downloaded_reel(filepath, filename, jid, job["url"])
++        Q.update(jid, status="completed", percent=100, file_id=fid, title=filename, message="Saved in your Discord Vault · Reels")
+     except Exception as exc:
+-        for job_id in job_ids:
+-            _reel_job_update(job_id, status="failed", message="Server downloader is unavailable. Check the yt-dlp installation.")
+-        return
+-    for job_id in job_ids:
+-        with _REEL_JOB_LOCK:
+-            job = dict(_REEL_JOBS.get(job_id) or {})
+-        if not job:
+-            continue
+-        temp_dir = tempfile.mkdtemp(prefix="vault-reel-")
++        _handle_failure(job, exc)
++    finally:
++        shutil.rmtree(temp_dir, ignore_errors=True)
++
++def _worker_loop():
++    while True:
+         try:
+-            _reel_job_update(job_id, status="downloading", percent=0, message="Connecting to Instagram…")
+-            def progress(data):
+-                if data.get("status") == "downloading":
+-                    total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+-                    downloaded = data.get("downloaded_bytes") or 0
+-                    percent = min(79, int(downloaded * 79 / total)) if total else 1
+-                    _reel_job_update(job_id, percent=percent,
+-                                     message="Downloading from Instagram · " + (str(data.get("_percent_str", "")).strip() or "working"))
+-                elif data.get("status") == "finished":
+-                    _reel_job_update(job_id, percent=79, message="Download complete · preparing Discord transfer…")
+-            options = {
+-                "format": "best[ext=mp4]/best",
+-                "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+-                "noplaylist": True, "quiet": True, "no_warnings": True,
+-                "restrictfilenames": True, "socket_timeout": 30,
+-                "retries": 2, "fragment_retries": 2, "extractor_retries": 2,
+-                "max_filesize": _REEL_MAX_BYTES, "progress_hooks": [progress],
+-            }
+-            with yt_dlp.YoutubeDL(options) as downloader:
+-                info = downloader.extract_info(job["url"], download=True)
+-                if not info:
+-                    raise RuntimeError("Instagram did not provide a downloadable video.")
+-                filepath = downloader.prepare_filename(info)
+-            if not os.path.isfile(filepath):
+-                candidates = [os.path.join(temp_dir, name) for name in os.listdir(temp_dir)]
+-                candidates = [p for p in candidates if os.path.isfile(p)]
+-                if not candidates:
+-                    raise RuntimeError("The downloaded video file was not found.")
+-                filepath = candidates[0]
+-            filename = _safe_reel_filename(info.get("title") or info.get("id"), os.path.splitext(filepath)[1].lstrip("."))
+-            _reel_job_update(job_id, status="storing", percent=80, title=filename,
+-                             message="Encrypting and sending video to Discord…")
+-            fid = _store_downloaded_reel(filepath, filename, job_id)
+-            _reel_job_update(job_id, status="completed", percent=100, file_id=fid,
+-                             title=filename, message="Saved in your Discord Vault · Reels")
++            if not V.KEY.get("aes"):
++                _load_worker_key()
++            if not V.KEY.get("aes") or time.time() < _IG["cool"]:
++                _WAKE.wait(8); _WAKE.clear(); continue
++            job = Q.claim()
++            if not job:
++                _WAKE.wait(8); _WAKE.clear(); continue
++            _process(job)
++            time.sleep(random.uniform(2, 5))  # be gentle with Instagram
+         except Exception as exc:
+-            message = str(exc).strip() or "Download failed."
+-            if "private" in message.lower() or "login" in message.lower() or "sign in" in message.lower():
+-                message = "This Reel is not publicly downloadable. Private/login-required links aren't supported."
+-            _reel_job_update(job_id, status="failed", message=message[:240])
+-        finally:
+-            import shutil
+-            shutil.rmtree(temp_dir, ignore_errors=True)
++            print("reel worker error:", exc, flush=True)
++            time.sleep(10)
++
++def _keepalive_loop():
++    base = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
++    while base:
++        time.sleep(600)
++        try:
++            if Q.summary()["active"] > 0:  # free web services sleep after 15 min without traffic
++                requests.get(base + "/health", timeout=20)
++        except Exception:
++            pass
++
++def _start_reel_workers():
++    Q.init()
++    for _ in range(2):  # concurrency stays at 2
++        threading.Thread(target=_worker_loop, daemon=True).start()
++    threading.Thread(target=_keepalive_loop, daemon=True).start()
+ 
+ @app.post("/api/reels/download")
+ def reels_download():
+     if not authed():
+         abort(403)
+-    data = request.get_json(silent=True) or {}
+-    raw_urls = data.get("urls") or []
++    raw_urls = (request.get_json(silent=True) or {}).get("urls") or []
+     if not isinstance(raw_urls, list):
+         return "Send a list of Instagram Reel URLs.", 400
+-    urls = []
++    if len(raw_urls) > BATCH_MAX:
++        return f"Send at most {BATCH_MAX} links per request.", 413
++    good, seen, invalid, samples, in_batch_dups = [], set(), 0, [], 0
+     for raw in raw_urls:
+         url = _valid_instagram_reel_url(raw)
+         if not url:
+-            return "Only public Instagram Reel links (instagram.com/reel/…) are accepted.", 400
+-        if url not in urls:
+-            urls.append(url)
+-    if not urls:
+-        return "Paste at least one Instagram Reel link.", 400
+-    job_ids = []
+-    now = time.time()
+-    with _REEL_JOB_LOCK:
+-        active = sum(1 for item in _REEL_JOBS.values() if item.get("status") in {"queued", "downloading", "storing"})
+-        for url in urls:
+-            job_id = secrets.token_hex(8)
+-            _REEL_JOBS[job_id] = {"id": job_id, "url": url, "status": "queued", "percent": 0,
+-                                  "message": "Waiting in server queue…", "title": "Instagram Reel",
+-                                  "created": now, "updated": now}
+-            job_ids.append(job_id)
+-    for job_id in job_ids:
+-        _REEL_EXECUTOR.submit(_run_reel_jobs, [job_id])
+-    return jsonify(jobs=[_REEL_JOBS[job_id] for job_id in job_ids])
++            invalid += 1
++            if len(samples) < 5:
++                samples.append(str(raw)[:80])
++        elif url in seen:
++            in_batch_dups += 1
++        else:
++            seen.add(url); good.append(url)
++    added = dup = requeued = 0
++    if good:
++        try:
++            added, dup, requeued = Q.add_many(good)
++        except Exception as exc:
++            return "Queue storage failed: " + str(exc)[:200], 503
++        _WAKE.set()
++    return jsonify(submitted=len(raw_urls), added=added, requeued=requeued, duplicates=dup + in_batch_dups,
++                   invalid=invalid, invalid_samples=samples, summary=Q.summary())
+ 
+ @app.get("/api/reels/jobs")
+ def reels_jobs():
+     if not authed():
+         abort(403)
+-    with _REEL_JOB_LOCK:
+-        all_jobs = list(_REEL_JOBS.values())
+-        counts = {status: sum(1 for item in all_jobs if item.get("status") == status)
+-                  for status in ("queued", "downloading", "storing", "completed", "failed")}
+-        counts["active"] = counts["queued"] + counts["downloading"] + counts["storing"]
+-        counts["total"] = len(all_jobs)
+-        jobs = sorted(all_jobs, key=lambda item: item.get("created", 0), reverse=True)[:50]
+-        return jsonify(jobs=jobs, summary=counts)
++    try:
++        limit = min(200, max(1, int(request.args.get("limit", 50))))
++        offset = max(0, int(request.args.get("offset", 0)))
++        return jsonify(jobs=Q.listing(limit, offset, request.args.get("status")), summary=Q.summary())
++    except Exception as exc:
++        return "Queue read failed: " + str(exc)[:200], 503
+ 
+-def authed():
+-    tok = V.KEY["token"]
+-    return bool(tok) and secrets.compare_digest(request.args.get("t", "").encode(), tok.encode())
++@app.post("/api/reels/retry_failed")
++def reels_retry_failed():
++    if not authed():
++        abort(403)
++    n = Q.retry_failed()
++    _WAKE.set()
++    return jsonify(requeued=n, summary=Q.summary())
+ 
+ def _add_messages(msgs):
+     global SCAN_FOUND
+@@ -391,7 +486,8 @@ def unlock():
+     pw = (request.get_json(silent=True) or {}).get("p", "")
+     if not pw:
+         return "Enter the vault password.", 400
+-    aes = AESGCM(PBKDF2HMAC(SHA256(), 32, b"vault-v1", 300000).derive(pw.encode()))
++    raw = PBKDF2HMAC(SHA256(), 32, b"vault-v1", 300000).derive(pw.encode())
++    aes = AESGCM(raw)
+     with SCAN_LOCK:
+         global SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR
+         SCAN_FOUND, SCAN_BEFORE, SCAN_DONE, SCAN_BUSY, SCAN_ERROR = {}, None, False, False, ""
+@@ -405,16 +501,18 @@ def unlock():
+         time.sleep(0.5)
+         return "Incorrect vault password.", 401
+     V.clear_stream_state()
+-    V.KEY["aes"], V.KEY["token"] = aes, secrets.token_urlsafe(24)
++    V.KEY["aes"], V.KEY["raw"] = aes, raw
++    _persist_worker_key(raw)
++    _WAKE.set()
+     with _lock:
+         LIB.update(t=0, items=[])
+     start_scan()
+-    return jsonify(t=V.KEY["token"])
++    return jsonify(t=make_token(raw))
+ 
+ @app.post("/api/lock")
+ def lock():
+-    if authed():
+-        end_session()
++    # Sessions are stateless and shared by every device, and queued downloads
++    # need the key, so "lock" only drops this device's token (done client-side).
+     return "", 204
+ 
+ @app.get("/api/library")
+@@ -509,7 +607,11 @@ def delete_file(fid):
+         return "File not found.", 404
+     for mid in ids:
+         if mid:
+-            V.dc("DELETE", f"/channels/{V.CH}/messages/{mid}")
++            try:
++                V.dc("DELETE", f"/channels/{V.CH}/messages/{mid}")
++            except requests.HTTPError as e:
++                if e.response is None or e.response.status_code != 404:  # already gone is fine
++                    raise
+     with SCAN_LOCK:
+         SCAN_FOUND.pop(fid, None)
+         META_CACHE.pop(fid, None)
+@@ -602,3 +704,5 @@ def upload_chunk():
+         with _lock:
+             LIB.update(t=0, items=[])
+     return "", 204
++
++_start_reel_workers()
+diff --git a/phone_v2.html b/phone_v2.html
+index 9ab166e..70d5cff 100644
+--- a/phone_v2.html
++++ b/phone_v2.html
+@@ -172,7 +172,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
+ </div>
+ </section>
+ <script>
+-let token="",pollTimer=null,loading=false,allItems=[],playQueue=[],currentIndex=-1,customGroups=[],fileGroups={};
++let token=(()=>{try{return localStorage.getItem("vt")||""}catch(e){return ""}})(),saveTok=t=>{try{t?localStorage.setItem("vt",t):localStorage.removeItem("vt")}catch(e){}},pollTimer=null,loading=false,allItems=[],playQueue=[],currentIndex=-1,customGroups=[],fileGroups={};
+ const $=id=>document.getElementById(id);
+ const FOLDER_COLORS=[
+  {name:"Blue",value:"#3b82f6"},{name:"Red",value:"#ef4444"},
+@@ -182,7 +182,7 @@ const FOLDER_COLORS=[
+  {name:"Cyan",value:"#06b6d4"},{name:"Slate",value:"#64748b"}
+ ];
+ function auth(url){return url+(url.includes("?")?"&":"?")+"t="+encodeURIComponent(token)}
+-async function api(url,opts={}){const r=await fetch(url,opts);if(r.status===403&&token){token="";if(pollTimer){clearInterval(pollTimer);pollTimer=null}loading=false;allItems=[];playQueue=[];currentIndex=-1;try{$("video").pause();$("video").removeAttribute("src");$("video").load();$("app").classList.add("hidden");$("login").classList.remove("hidden");loginSay("Your vault session expired. Enter your password to unlock again.")}catch(e){}}if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
++async function api(url,opts={}){const r=await fetch(url,opts);if(r.status===403&&token){token="";saveTok("");if(pollTimer){clearInterval(pollTimer);pollTimer=null}if(reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}loading=false;allItems=[];playQueue=[];currentIndex=-1;try{$("video").pause();$("video").removeAttribute("src");$("video").load();$("app").classList.add("hidden");$("login").classList.remove("hidden");loginSay("Your vault session expired. Enter your password to unlock again.")}catch(e){}}if(!r.ok)throw new Error((await r.text())||("Request failed: "+r.status));return r}
+ function say(s){$("status").textContent=s}
+ function loginSay(s){$("loginStatus").textContent=s}
+ function folderName(f){return (f.folder||"").replace(/^\/+|\/+$/g,"")||"Unsorted"}
+@@ -554,7 +554,7 @@ async function refreshReelJobs(){
+   const next=data.jobs||[],summary=data.summary||{};
+   const newlyCompleted=next.some(job=>job.status==="completed"&&!reelJobs.some(old=>old.id===job.id&&old.status==="completed"));
+   reelJobs=next;renderReelJobs();
+-  if(summary.total!==undefined)$("reelStatus").textContent="Reel downloads · "+summary.completed+" saved · "+summary.failed+" failed · "+summary.active+" remaining · "+summary.total+" submitted";
++  if(summary.total!==undefined)$("reelStatus").textContent="Reel downloads · "+summary.total+" submitted · "+summary.completed+" saved · "+summary.failed+" failed · "+summary.queued+" queued · "+summary.downloading+" downloading"+(summary.storing?" · "+summary.storing+" storing":"")+" · "+summary.remaining+" remaining"+(summary.durable===false?" · ⚠ queue not persistent (no database)":"");
+   const active=Number(summary.active||0)>0||next.some(job=>["queued","downloading","storing"].includes(job.status));
+   if(active&&!reelJobPoll)reelJobPoll=setInterval(refreshReelJobs,2200);
+   if(!active&&reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}
+@@ -570,18 +570,26 @@ function extractInstagramReelLinks(raw){
+ }
+ $("downloadReels").onclick=async()=>{
+  const raw=$("reelLinks").value;
++ const all=[...String(raw||"").matchAll(/https?:\/\/(?:(?:www|m)\.)?instagram\.com\/(?:[^\/\s"'<>]+\/)?(?:reel|reels)\/[A-Za-z0-9_-]+/gi)].length;
+  const urls=extractInstagramReelLinks(raw);
+  if(!urls.length){$("reelStatus").textContent="I couldn't find Instagram Reel URLs in that text. Paste the full https://www.instagram.com/reel/… links or the exported JSON/HTML contents.";return}
+- $("reelStatus").textContent="Found "+urls.length+" unique Reel links. Sending them to the server queue…";
+  $("downloadReels").disabled=true;
++ const t={added:0,requeued:0,duplicates:0,invalid:0},step=500;let sent=0,failedChunk="";
+  try{
+-  const data=await(await api(auth("/api/reels/download"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls})})).json();
++  for(let i=0;i<urls.length;i+=step){
++   $("reelStatus").textContent="Sending "+Math.min(i+step,urls.length)+" / "+urls.length+" links to the server queue…";
++   const d=await(await api(auth("/api/reels/download"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls:urls.slice(i,i+step)})})).json();
++   for(const k in t)t[k]+=d[k]||0;sent=Math.min(i+step,urls.length);
++   await new Promise(r=>setTimeout(r,0));
++  }
+   $("reelLinks").value="";
+-  $("reelStatus").textContent="Sent "+(data.jobs||[]).length+" link(s) to the server download queue. Your device is not downloading the videos.";
+-  await refreshReelJobs();
+- }catch(e){$("reelStatus").textContent="Could not start downloads: "+e.message}
+- finally{$("downloadReels").disabled=false}
++ }catch(e){failedChunk=" Stopped after "+sent+" of "+urls.length+" links ("+e.message+"). Paste again: links already queued are detected as duplicates."}
++ const pasteDups=Math.max(0,all-urls.length);
++ $("reelStatus").textContent="Queued "+t.added+" new · "+t.duplicates+" already in the queue/vault"+(t.requeued?" · "+t.requeued+" failed ones re-queued":"")+(pasteDups?" · "+pasteDups+" repeated in your paste":"")+(t.invalid?" · "+t.invalid+" rejected as invalid":"")+". Your device is not downloading the videos."+failedChunk;
++ $("downloadReels").disabled=false;
++ try{await refreshReelJobs()}catch(e){}
+ };
++if(!$("retryFailedReels")){const b=document.createElement("button");b.id="retryFailedReels";b.className="secondary";b.textContent="Retry failed";b.onclick=async()=>{try{const d=await(await api(auth("/api/reels/retry_failed"),{method:"POST"})).json();$("reelStatus").textContent="Re-queued "+d.requeued+" failed Reel(s).";await refreshReelJobs()}catch(e){$("reelStatus").textContent=e.message}};$("downloadReels").insertAdjacentElement("afterend",b)}
+ $("uploadReels").onclick=async()=>{
+  if(!$("reelFiles").files.length){$("reelFiles").click();return}
+  const fs=[...$("reelFiles").files].filter(f=>f.type.startsWith("video/")||/\.(mp4|m4v|webm|mov|ogv)$/i.test(f.name));
+@@ -605,7 +613,7 @@ $("uploadReels").onclick=async()=>{
+ $("unlock").onclick=async()=>{
+  try{loginSay("Checking password…");$("unlock").disabled=true;
+   const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});
+-  token=(await r.json()).t;$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();await refreshReelJobs();
++  token=(await r.json()).t;saveTok(token);$("login").classList.add("hidden");$("app").classList.remove("hidden");await load();await refreshReelJobs();
+   if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),3000);
+  }catch(e){loginSay(e.message)}finally{$("unlock").disabled=false}
+ };
+@@ -684,7 +692,7 @@ $("video").addEventListener("ended",()=>moveQueue(1));
+ $("speed").onchange=()=>{vid.playbackRate=Number($("speed").value)};
+ $("lock").onclick=async()=>{
+  try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}
+- token="";if(pollTimer)clearInterval(pollTimer);pollTimer=null;
++ token="";saveTok("");if(pollTimer)clearInterval(pollTimer);pollTimer=null;if(reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null};
+  $("video").pause();$("video").removeAttribute("src");$("video").querySelectorAll("track").forEach(t=>t.remove());if(subtitleObjectUrl){URL.revokeObjectURL(subtitleObjectUrl);subtitleObjectUrl=""}$("video").load();$("captionMenu").innerHTML="";
+  allItems=[];playQueue=[];currentIndex=-1;for(const node of reelNodes.values()){const rv=node.querySelector("video");rv.pause();rv.removeAttribute("src");rv.load()}reelNodes.clear();reelItems=[];reelActive=-1;$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";loginSay("Vault locked.")
+ };
+@@ -729,4 +737,5 @@ $("pdfScroll").addEventListener("wheel",e=>{if(e.ctrlKey||e.metaKey){e.preventDe
+ let pinchDistance=0;$("pdfScroll").addEventListener("touchmove",e=>{if(e.touches.length===2){const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(pinchDistance&&Math.abs(d/pinchDistance-1)>.04)queuePdfZoom(pdfScale*d/pinchDistance);pinchDistance=d}},{passive:true});$("pdfScroll").addEventListener("touchend",()=>pinchDistance=0,{passive:true});
+ $("audioPlay").onclick=audioPlay;$("audioPause").onclick=()=>speechSynthesis.pause();$("audioBack").onclick=()=>{audioStop();audioChunkIndex=Math.max(0,audioChunkIndex-1);audioPlay()};$("audioForward").onclick=()=>{audioStop();audioChunkIndex=Math.min(audioChunks.length-1,audioChunkIndex+1);audioPlay()};if(window.speechSynthesis){loadAudioVoices();speechSynthesis.onvoiceschanged=loadAudioVoices}
+ 
++if(token){$("login").classList.add("hidden");$("app").classList.remove("hidden");(async()=>{try{await load();await refreshReelJobs();if(token){if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(()=>load(),3000)}}catch(e){}})()}
+ </script></body></html>
+diff --git a/reel_queue.py b/reel_queue.py
+new file mode 100644
+index 0000000..469d07e
+--- /dev/null
++++ b/reel_queue.py
+@@ -0,0 +1,154 @@
++"""Durable Reel job queue. Postgres when DATABASE_URL is set, else a local
++SQLite file (NOT durable on Render's free plan: the disk is wiped on restart).
++Contains no secrets: only URLs, status and progress."""
++import os, sqlite3, threading, time
++
++DB_URL = os.environ.get("DATABASE_URL", "").strip()
++PG = DB_URL.startswith(("postgres://", "postgresql://"))
++SQLITE_PATH = os.environ.get("REEL_QUEUE_SQLITE", "/tmp/reel_queue.db")
++ERROR = ""          # last DB problem, shown in the UI
++DURABLE = False
++_psycopg = None
++_claim_lock = threading.Lock()
++SKIP = ""
++
++def _connect():
++    if PG:
++        return _psycopg.connect(DB_URL, autocommit=True, connect_timeout=10)
++    c = sqlite3.connect(SQLITE_PATH, timeout=30, isolation_level=None, check_same_thread=False)
++    c.execute("PRAGMA journal_mode=WAL")
++    return c
++
++def _q(conn, sql, args=(), fetch=None):
++    cur = conn.cursor()
++    cur.execute(sql.replace("?", "%s") if PG else sql, args)
++    if fetch:
++        cols = [d[0] for d in cur.description]
++        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
++        return rows if fetch == "all" else (rows[0] if rows else None)
++    return cur.rowcount
++
++def _run(sql, args=(), fetch=None):
++    conn = _connect()
++    try:
++        return _q(conn, sql, args, fetch)
++    finally:
++        conn.close()
++
++def init():
++    """Create tables and requeue anything a crash left mid-flight."""
++    global PG, DURABLE, ERROR, SKIP, _psycopg
++    if PG:
++        try:
++            import psycopg as _p
++            _psycopg = _p
++        except Exception as e:
++            ERROR = "psycopg missing (%s); using non-durable fallback." % e
++            PG = False
++    pk = "BIGSERIAL PRIMARY KEY" if PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
++    ddl = [
++        "CREATE TABLE IF NOT EXISTS reel_jobs(id %s, url TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'queued',"
++        " attempts INTEGER NOT NULL DEFAULT 0, next_try DOUBLE PRECISION NOT NULL DEFAULT 0, percent INTEGER NOT NULL DEFAULT 0,"
++        " message TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT 'Instagram Reel', file_id TEXT,"
++        " created DOUBLE PRECISION NOT NULL, updated DOUBLE PRECISION NOT NULL)" % pk,
++        "CREATE INDEX IF NOT EXISTS reel_jobs_status ON reel_jobs(status, id)",
++        "CREATE TABLE IF NOT EXISTS reel_kv(k TEXT PRIMARY KEY, v TEXT NOT NULL)",
++    ]
++    last = None
++    for _ in range(3):
++        try:
++            conn = _connect()
++            try:
++                for s in ddl:
++                    _q(conn, s)
++                _q(conn, "UPDATE reel_jobs SET status='queued', message='Recovered after restart', updated=? "
++                         "WHERE status IN ('downloading','storing')", (time.time(),))
++            finally:
++                conn.close()
++            DURABLE = PG
++            SKIP = "FOR UPDATE SKIP LOCKED" if PG else ""
++            if not PG and not ERROR:
++                ERROR = "DATABASE_URL is not set: queue is NOT persistent across restarts."
++            return
++        except Exception as e:
++            last = e
++            time.sleep(2)
++    if PG:  # DB unreachable: degrade loudly instead of crashing the app
++        ERROR = "Postgres unreachable (%s); using non-durable fallback." % str(last)[:120]
++        PG = False
++        init()
++
++def add_many(urls):
++    """Insert URLs. Returns (added, duplicates, requeued). Failed duplicates are re-queued."""
++    added = dup = requeued = 0
++    now = time.time()
++    conn = _connect()
++    try:
++        for u in urls:
++            n = _q(conn, "INSERT INTO reel_jobs(url,status,created,updated) VALUES(?,'queued',?,?) "
++                         "ON CONFLICT(url) DO NOTHING", (u, now, now))
++            if n == 1:
++                added += 1
++            else:
++                r = _q(conn, "UPDATE reel_jobs SET status='queued', attempts=0, next_try=0, percent=0, "
++                             "message='Re-queued', updated=? WHERE url=? AND status='failed'", (now, u))
++                if r == 1:
++                    requeued += 1
++                else:
++                    dup += 1
++    finally:
++        conn.close()
++    return added, dup, requeued
++
++def claim():
++    with _claim_lock:
++        now = time.time()
++        return _run(
++            "UPDATE reel_jobs SET status='downloading', attempts=attempts+1, percent=0, message='Starting…', updated=? "
++            "WHERE id=(SELECT id FROM reel_jobs WHERE status='queued' AND next_try<=? ORDER BY id LIMIT 1 " + SKIP + ") "
++            "AND status='queued' RETURNING id,url,attempts,file_id,title", (now, now), "one")
++
++_COLS = {"status", "attempts", "next_try", "percent", "message", "title", "file_id"}
++
++def update(job_id, **vals):
++    vals = {k: v for k, v in vals.items() if k in _COLS}
++    if not vals:
++        return
++    sets = ", ".join(k + "=?" for k in vals) + ", updated=?"
++    try:
++        _run("UPDATE reel_jobs SET " + sets + " WHERE id=?", (*vals.values(), time.time(), job_id))
++    except Exception:
++        pass  # progress updates are best-effort
++
++def summary():
++    rows = _run("SELECT status, COUNT(*) AS c FROM reel_jobs GROUP BY status", (), "all") or []
++    s = {k: 0 for k in ("queued", "downloading", "storing", "completed", "failed")}
++    for r in rows:
++        s[r["status"]] = int(r["c"])
++    s["active"] = s["queued"] + s["downloading"] + s["storing"]
++    s["remaining"] = s["active"]
++    s["total"] = sum(s[k] for k in ("queued", "downloading", "storing", "completed", "failed"))
++    s["durable"] = DURABLE
++    s["db_note"] = ERROR
++    return s
++
++def listing(limit=50, offset=0, status=None):
++    where, args = "", []
++    if status in ("queued", "downloading", "storing", "completed", "failed"):
++        where, args = "WHERE status=?", [status]
++    return _run(
++        "SELECT id,url,status,percent,message,title,file_id,attempts,created,updated FROM reel_jobs " + where +
++        " ORDER BY CASE status WHEN 'downloading' THEN 0 WHEN 'storing' THEN 0 WHEN 'failed' THEN 1 "
++        "WHEN 'queued' THEN 2 ELSE 3 END, CASE WHEN status='queued' THEN id END ASC, updated DESC LIMIT ? OFFSET ?",
++        (*args, int(limit), int(offset)), "all") or []
++
++def retry_failed():
++    return _run("UPDATE reel_jobs SET status='queued', attempts=0, next_try=0, percent=0, message='Re-queued', "
++                "updated=? WHERE status='failed'", (time.time(),))
++
++def kv_get(k):
++    r = _run("SELECT v FROM reel_kv WHERE k=?", (k,), "one")
++    return r["v"] if r else None
++
++def kv_set(k, v):
++    _run("INSERT INTO reel_kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+diff --git a/requirements.txt b/requirements.txt
+index e9579f7..ba83956 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -2,3 +2,4 @@ Flask>=3.0,<4
+ requests>=2.31
+ cryptography>=42
+ yt-dlp>=2025.1.15
++psycopg[binary]>=3.2
+diff --git a/vault_server.py b/vault_server.py
+index 27925f6..fcf5e2e 100644
+--- a/vault_server.py
++++ b/vault_server.py
+@@ -14,7 +14,8 @@ S = requests.Session()
+ S.headers.update({"Authorization": "Bot " + TOKEN, "User-Agent": "VaultPhone/1.0"})
+ CHUNK = 9 * 1024 * 1024
+ CACHE_MAX = 50 * 1024 * 1024
+-KEY = {"aes": None, "token": None}
++KEY = {"aes": None, "raw": None}
++AUTH_CHECK = lambda: False  # set by phone_server (stateless token check)
+ _cache, _cache_bytes = OrderedDict(), 0
+ _clock = threading.Lock()
+ _inflight = {}
+@@ -23,8 +24,16 @@ _files, _flock = {}, threading.Lock()
+ def dc(method, path, **kw):
+     # Discord rate limits channel-history pagination. Respect both the HTTP
+     # Retry-After header and JSON retry_after, and allow longer cooldowns.
++    errs = 0
+     for attempt in range(30):
+-        r = S.request(method, API + path, timeout=300, **kw)
++        try:
++            r = S.request(method, API + path, timeout=300, **kw)
++        except (requests.ConnectionError, requests.Timeout):
++            errs += 1
++            if errs > 4: raise
++            time.sleep(2 ** errs); continue
++        if r.status_code >= 500 and errs < 4:
++            errs += 1; time.sleep(2 ** errs); continue
+         if r.status_code == 429:
+             try:
+                 body = r.json()
+@@ -110,7 +119,7 @@ def get_chunk(fid, idx):
+ 
+ def stream(fid):
+     import secrets
+-    if not KEY["aes"] or not secrets.compare_digest(request_token(), KEY["token"] or "x"): abort(403)
++    if not AUTH_CHECK(): abort(403)
+     info = get_info(fid)
+     size = info["size"]
+     if size <= 0: return Response(b"", mimetype=info["type"] or "application/octet-stream")
+-- 
+2.43.0
+
+
+From ee728431a6de74883b494962a201ee8b0edcb05f Mon Sep 17 00:00:00 2001
+From: claude <c@x>
+Date: Sun, 8 Nov 2026 17:08:54 +0000
+Subject: [PATCH 2/2] Reels feed: placeholder slides, 4-video window, stable
+ order, no duration probing
+
+---
+ phone_v2.html | 140 ++++++++++++++++++--------------------------------
+ 1 file changed, 49 insertions(+), 91 deletions(-)
+
+diff --git a/phone_v2.html b/phone_v2.html
+index 70d5cff..4cad1ee 100644
+--- a/phone_v2.html
++++ b/phone_v2.html
+@@ -323,7 +323,7 @@ function setReelSpeed(enabled){
+ const reelDurationCache=new Map();
+ const REEL_BATCH_SIZE=10;
+ let reelDurationScanRunning=false,reelCandidateList=[],reelCandidateCursor=0,reelCandidateKey="",reelShuffle=false,reelLoadTarget=10;
+-function isReel(f){const d=reelDurationCache.get(f?.id);return !!(f&&f.ok&&isVideo(f)&&Number.isFinite(d)&&d>0&&d<900)}
++function isReel(f){return !!(f&&f.ok&&isVideo(f)&&(f.folder==="Reels"||(Number(f.size)||0)<=120*1024*1024))}
+ function shuffleList(list){
+  const out=[...list];
+  for(let i=out.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[out[i],out[j]]=[out[j],out[i]]}
+@@ -332,59 +332,17 @@ function shuffleList(list){
+ function prepareReelCandidates(){
+  const base=allItems.filter(f=>f.ok&&isVideo(f)).sort((a,b)=>(b.t||0)-(a.t||0));
+  const key=base.map(f=>f.id).join("|");
+- if(key!==reelCandidateKey){
+-  const priorIds=new Set(reelCandidateList.map(f=>f.id));
+-  const present=new Set(base.map(f=>f.id));
+-  reelCandidateKey=key;
+-  if(reelShuffle&&reelCandidateList.length){
+-   reelCandidateList=reelCandidateList.filter(f=>present.has(f.id)).concat(shuffleList(base.filter(f=>!priorIds.has(f.id))));
+-  }else reelCandidateList=reelShuffle?shuffleList(base):base;
+-  reelCandidateCursor=0;
+-  while(reelCandidateCursor<reelCandidateList.length&&reelDurationCache.has(reelCandidateList[reelCandidateCursor].id))reelCandidateCursor++;
+- }
+-}
+-async function scanReelDurations(initial=false){
+- if(reelDurationScanRunning)return;
+- prepareReelCandidates();
+- if(!initial&&reelItems.length-reelActive>3)return;
+- const batch=[];
+- while(reelCandidateCursor<reelCandidateList.length&&batch.length<REEL_BATCH_SIZE){
+-  const f=reelCandidateList[reelCandidateCursor++];
+-  if(!reelDurationCache.has(f.id))batch.push(f);
+- }
+- if(!batch.length){renderReels();return}
+- reelDurationScanRunning=true;
+- $("reelStatus").textContent="Loading the next "+batch.length+" Reels…";
+- try{
+-  let cursor=0;
+-  async function worker(){
+-   while(cursor<batch.length){
+-    const f=batch[cursor++];
+-    const v=document.createElement("video");
+-    v.preload="metadata";v.muted=true;v.src=auth("/api/stream/"+encodeURIComponent(f.id));
+-    try{
+-     const duration=await new Promise(resolve=>{
+-      let settled=false;
+-      const finish=value=>{if(settled)return;settled=true;clearTimeout(timer);resolve(value)};
+-      const timer=setTimeout(()=>finish(null),12000);
+-      v.addEventListener("loadedmetadata",()=>finish(Number.isFinite(v.duration)?v.duration:null),{once:true});
+-      v.addEventListener("error",()=>finish(null),{once:true});
+-      v.load();
+-     });
+-     reelDurationCache.set(f.id,duration!==null&&duration>0?duration:Infinity);
+-    }finally{v.pause();v.removeAttribute("src");v.load()}
+-   }
+-  }
+-  await Promise.all([worker(),worker(),worker()]);
+- }finally{
+-  reelDurationScanRunning=false;
+-  renderReels();
+-  if($("reelsPanel")&&!$("reelsPanel").classList.contains("hidden")){
+-   if(reelActive<0&&reelItems.length)activateReel(0);
+-   if(reelItems.length<reelLoadTarget&&reelCandidateCursor<reelCandidateList.length)scanReelDurations(true);
+-  }
++ if(key===reelCandidateKey)return;
++ reelCandidateKey=key;
++ if(!reelCandidateList.length){reelCandidateList=reelShuffle?shuffleList(base):base}
++ else{
++  const present=new Set(base.map(f=>f.id)),prior=new Set(reelCandidateList.map(f=>f.id));
++  const fresh=base.filter(f=>!prior.has(f.id));
++  reelCandidateList=reelCandidateList.filter(f=>present.has(f.id)).concat(reelShuffle?shuffleList(fresh):fresh);
+  }
++ reelCandidateCursor=reelCandidateList.length;
+ }
++function scanReelDurations(){prepareReelCandidates();renderReels()}
+ function setVaultTab(tab){
+  const reels=tab==="reels";
+  $("libraryTools").classList.toggle("hidden",reels);
+@@ -395,7 +353,8 @@ function setVaultTab(tab){
+  $("reelsTab").classList.toggle("active",reels);
+  $("libraryTab").setAttribute("aria-selected",String(!reels));
+  $("reelsTab").setAttribute("aria-selected",String(reels));
+- if(reels){renderReels();if(!reelItems.length)scanReelDurations(true);refreshReelJobs();if(reelActive<0&&reelItems.length)activateReel(0)}
++ if(reels){renderReels();refreshReelJobs();if(reelActive<0&&reelItems.length)activateReel(0);requestAnimationFrame(()=>{const f=$("reelFeed");if(reelActive>=0&&f.clientHeight)f.scrollTop=reelActive*f.clientHeight;const n=reelNodes.get(reelActive);if(n)n.querySelector("video").play().catch(()=>{})})}
++ else{for(const n of reelNodes.values())n.querySelector("video").pause()}
+ }
+ $("libraryTab").onclick=()=>setVaultTab("library");
+ $("reelsTab").onclick=()=>setVaultTab("reels");
+@@ -429,21 +388,22 @@ function makeReelNode(item,index){
+  actions.append(fullscreen,speed,play);overlay.append(name,actions);slide.append(video,overlay);
+  return slide;
+ }
++function reelShell(i){const a=document.createElement("article");a.className="reel-slide";a.dataset.index=String(i);return a}
++function releaseReelVideo(v){v.pause();if(v.getAttribute("src")){v.removeAttribute("src");v.load()}}
+ function ensureReelWindow(center){
+- const feed=$("reelFeed"),lo=Math.max(0,center-3),hi=Math.min(reelItems.length-1,center+2);
++ const feed=$("reelFeed"),lo=Math.max(0,center-1),hi=Math.min(reelItems.length-1,center+2);
+  for(let i=lo;i<=hi;i++){
+   if(!reelNodes.has(i)){
+-   const node=makeReelNode(reelItems[i],i);reelNodes.set(i,node);
+-   const next=[...reelNodes.keys()].filter(k=>k>i).sort((a,b)=>a-b)[0];
+-   if(next!==undefined)feed.insertBefore(node,reelNodes.get(next));else feed.append(node);
++   const shell=feed.children[i];if(!shell)continue;
++   const node=makeReelNode(reelItems[i],i);shell.replaceWith(node);reelNodes.set(i,node);
+   }
+   const v=reelNodes.get(i).querySelector("video");
+-  if(i===center&&!v.src){v.preload="auto";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}
+-  else if(i===center+1&&!v.src){v.preload="metadata";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}
+-  else if(i!==center&&i!==center+1){v.preload="none";if(v.src){v.removeAttribute("src");v.load()}}
++  if(i===center){if(!v.getAttribute("src")){v.preload="auto";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}}
++  else if(i===center+1){if(!v.getAttribute("src")){v.preload="metadata";v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}}
++  else releaseReelVideo(v);
+  }
+  for(const [i,node] of [...reelNodes.entries()]){
+-  if(i<lo||i>hi){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load();node.remove();reelNodes.delete(i)}
++  if(i<lo||i>hi){releaseReelVideo(node.querySelector("video"));node.replaceWith(reelShell(i));reelNodes.delete(i)}
+  }
+ }
+ function activateReel(index){
+@@ -482,56 +442,54 @@ document.addEventListener("fullscreenchange",syncReelFullscreen);
+ document.addEventListener("webkitfullscreenchange",syncReelFullscreen);
+ function renderReels(){
+  prepareReelCandidates();
+- const previousId=reelItems[reelActive]?.id||"";
++ const feed=$("reelFeed"),previousId=reelItems[reelActive]?.id||"";
+  const nextItems=reelCandidateList.filter(isReel);
+- const changed=nextItems.length!==reelItems.length||nextItems.some((x,i)=>x.id!==reelItems[i]?.id);
+  const appendOnly=nextItems.length>=reelItems.length&&reelItems.every((x,i)=>nextItems[i]?.id===x.id);
+- const rebuild=changed&&!appendOnly;
+- const needsActivation=reelActive<0&&nextItems.length>0;
+- reelItems=nextItems;
+- $("reelCount").textContent=reelItems.length?" · "+reelItems.length+(reelCandidateCursor<reelCandidateList.length?" loaded":""):"";
++ const shellsOk=feed.children.length===reelItems.length&&!!feed.querySelector(".reel-slide");
++ $("reelCount").textContent=nextItems.length?" · "+nextItems.length:"";
++ if(appendOnly&&shellsOk&&nextItems.length===reelItems.length)return;
++ const oldLen=reelItems.length;reelItems=nextItems;
+  if(!reelItems.length){
+-  for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
++  for(const node of reelNodes.values())releaseReelVideo(node.querySelector("video"));
+   reelNodes.clear();
+-  $("reelFeed").innerHTML='<div class="reel-empty">'+(reelCandidateList.length?'Loading your first 10 Reels…':'No videos are available in your vault yet.')+'</div>';
+-  if(!reelDurationScanRunning&&reelCandidateCursor<reelCandidateList.length)$("reelStatus").textContent="Preparing the first 12 Reels…";
+-  else if(!reelCandidateList.length)$("reelStatus").textContent="No videos found in your server vault.";
++  feed.innerHTML='<div class="reel-empty">'+(allItems.length?'No Reels in your vault yet.':'Loading your vault…')+'</div>';
+   reelActive=-1;return;
+  }
+- if(rebuild){
+-  for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
+-  reelNodes.clear();$("reelFeed").innerHTML="";
+-  reelActive=previousId?reelItems.findIndex(x=>x.id===previousId):-1;
++ if(appendOnly&&shellsOk){
++  const frag=document.createDocumentFragment();
++  for(let i=oldLen;i<reelItems.length;i++)frag.append(reelShell(i));
++  feed.append(frag);
++  if(reelActive<0){reelActive=0;ensureReelWindow(0);activateReel(0)}
++  return;
+  }
+- if(reelActive<0)reelActive=0;
+- ensureReelWindow(reelActive);
+- if(rebuild||needsActivation)activateReel(reelActive);
++ for(const node of reelNodes.values())releaseReelVideo(node.querySelector("video"));
++ reelNodes.clear();feed.innerHTML="";
++ const frag=document.createDocumentFragment();
++ for(let i=0;i<reelItems.length;i++)frag.append(reelShell(i));
++ feed.append(frag);
++ reelActive=previousId?Math.max(0,reelItems.findIndex(x=>x.id===previousId)):0;
++ if(feed.clientHeight)feed.scrollTop=reelActive*feed.clientHeight;
++ ensureReelWindow(reelActive);activateReel(reelActive);
+ }
+ function nearestReel(){
+- const feed=$("reelFeed"),slides=[...feed.querySelectorAll(".reel-slide")];if(!slides.length)return;
+- const mid=feed.getBoundingClientRect().top+feed.clientHeight/2;
+- let best=slides[0],dist=Infinity;
+- for(const slide of slides){const r=slide.getBoundingClientRect(),d=Math.abs((r.top+r.bottom)/2-mid);if(d<dist){best=slide;dist=d}}
+- const idx=Number(best.dataset.index);if(Number.isInteger(idx)&&idx!==reelActive)activateReel(idx);
++ const feed=$("reelFeed");if(!reelItems.length||!feed.clientHeight)return;
++ const idx=Math.max(0,Math.min(reelItems.length-1,Math.round(feed.scrollTop/feed.clientHeight)));
++ if(idx!==reelActive)activateReel(idx);
+ }
+ $("reelFeed").addEventListener("scroll",()=>{
+  if(reelScrollTick)return;
+- reelScrollTick=requestAnimationFrame(()=>{
+-  reelScrollTick=0;nearestReel();
+-  if(reelItems.length-reelActive<=3&&reelCandidateCursor<reelCandidateList.length){reelLoadTarget=Math.max(reelLoadTarget,reelItems.length+10);scanReelDurations(true)}
+- });
++ reelScrollTick=requestAnimationFrame(()=>{reelScrollTick=0;nearestReel()});
+ },{passive:true});
++window.addEventListener("resize",()=>{const f=$("reelFeed");if(reelActive>=0&&f.clientHeight&&!$("reelsPanel").classList.contains("hidden"))f.scrollTop=reelActive*f.clientHeight});
+ $("shuffleReels").onclick=()=>{
+  reelShuffle=!reelShuffle;
+  $("shuffleReels").textContent=reelShuffle?"Shuffle: On":"Shuffle";
+  $("shuffleReels").classList.toggle("speed-active",reelShuffle);
+- for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
+- reelCandidateList=[];reelCandidateKey="";reelCandidateCursor=0;reelLoadTarget=10;
+- prepareReelCandidates();
++ for(const node of reelNodes.values())releaseReelVideo(node.querySelector("video"));
++ reelCandidateList=[];reelCandidateKey="";
+  reelNodes.clear();$("reelFeed").innerHTML="";
+  reelActive=-1;reelItems=[];
+  renderReels();
+- if(reelCandidateCursor<reelCandidateList.length)scanReelDurations(true);
+ };
+ function renderReelJobs(){
+  const root=$("reelJobs");root.innerHTML="";
+-- 
+2.43.0
+
