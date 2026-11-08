@@ -62,6 +62,28 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 #player:fullscreen~*{display:none}
 @media(max-width:600px){.yt-controls{padding:28px 8px 8px}.yt-row{gap:3px}.yt-controls button{min-width:34px;min-height:42px;padding:7px 6px}#volume{width:56px}#time{font-size:11px}#volumeValue{min-width:28px;font-size:10px}#aspect{max-width:105px}#player:fullscreen .yt-controls,#player:-webkit-full-screen .yt-controls{padding:48px 8px max(12px,env(safe-area-inset-bottom))}}
 
+
+/* Reels */
+.tabbar{display:flex;gap:8px;margin:14px 0}
+.tabbar button{flex:1;padding:12px;border-radius:12px;background:#202a36;color:#aebaca}
+.tabbar button.active{background:#2563eb;color:#fff}
+#reelsPanel{margin-top:0}
+.reels-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.reels-upload{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.reels-upload input{max-width:100%;font-size:12px}
+#reelStatus{font-size:12px;color:#9eabb9;min-height:18px;margin:8px 0}
+#reelFeed{height:min(76dvh,850px);min-height:420px;overflow-y:auto;overscroll-behavior:contain;scroll-snap-type:y mandatory;border-radius:15px;background:#050608;scrollbar-width:none}
+#reelFeed::-webkit-scrollbar{display:none}
+.reel-slide{height:100%;min-height:420px;position:relative;display:flex;align-items:center;justify-content:center;scroll-snap-align:start;scroll-snap-stop:always;background:#050608;overflow:hidden}
+.reel-slide video{width:100%;height:100%;object-fit:contain;background:#050608}
+.reel-overlay{position:absolute;inset:auto 0 0;padding:52px 16px 18px;background:linear-gradient(transparent,rgba(0,0,0,.82));display:flex;align-items:flex-end;justify-content:space-between;gap:12px;pointer-events:none}
+.reel-name{font-size:13px;overflow-wrap:anywhere;color:#fff;text-shadow:0 1px 4px #000}
+.reel-actions{display:flex;flex-direction:column;gap:8px;pointer-events:auto}
+.reel-actions button{border-radius:50%;width:42px;height:42px;padding:0;background:#ffffff22;border:1px solid #ffffff44;backdrop-filter:blur(12px);font-size:17px}
+.reel-empty{height:100%;min-height:420px;display:grid;place-items:center;text-align:center;padding:25px;color:#aab4c0}
+.reel-loading{position:absolute;inset:0;display:grid;place-items:center;color:#aab4c0;font-size:13px;pointer-events:none}
+@media(max-width:600px){#reelFeed{height:calc(100dvh - 235px);min-height:420px;margin-inline:-2px}.reel-slide{min-height:420px}.reel-overlay{padding:48px 12px 14px}}
+
 #status{white-space:pre-wrap;color:#93c5fd;margin-top:9px;min-height:1.3em}
 .group{border:1px solid #303b49;border-radius:10px;margin:9px 0;overflow:hidden}
 .group summary{padding:12px 13px;background:#151c25;cursor:pointer;font-weight:600;display:flex;justify-content:space-between;gap:12px}
@@ -73,6 +95,10 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <h1>Vault</h1><p>Your encrypted library, streamed from Discord.</p>
 <section id="login" class="panel"><label for="password">Vault password</label><input id="password" type="password" autocomplete="current-password" placeholder="Enter the vault password"><button id="unlock">Unlock</button><div id="loginStatus" class="muted"></div></section>
 <section id="app" class="hidden">
+<div class="tabbar" role="tablist" aria-label="Vault sections">
+<button id="libraryTab" class="active" type="button" role="tab" aria-selected="true">Library</button>
+<button id="reelsTab" type="button" role="tab" aria-selected="false">Reels <span id="reelCount"></span></button>
+</div>
 <div class="panel">
 <div class="toolbar"><button id="refresh">Refresh library</button><button class="secondary" id="lock">Lock vault</button></div>
 <div class="toolbar" style="margin-top:10px">
@@ -81,8 +107,16 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <button id="upload">Upload selected</button>
 </div><div id="status"></div>
 </div>
+<div id="reelsPanel" class="panel hidden">
+<div class="reels-head"><div><h2>Reels</h2><small class="muted">Swipe vertically · one at a time</small></div><div class="reels-upload">
+<input id="reelFiles" type="file" accept="video/*,.mp4,.m4v,.webm,.mov,.ogv" multiple aria-label="Choose reels">
+<button id="uploadReels" type="button">Add reels</button>
+</div></div>
+<div id="reelStatus">Videos uploaded here are stored in your encrypted Reels folder.</div>
+<div id="reelFeed"><div class="reel-empty">Your Reels folder is empty.<br>Choose videos above to add your first reels.</div></div>
+</div>
 <div id="library" class="panel"><div class="player-head"><h2>Library</h2><small id="total"></small></div><input id="search" type="search" placeholder="Search files and folders"><div id="items"></div></div>
-<div class="panel">
+<div class="panel" id="playerPanel">
 <div class="player-head"><h2 id="playing">Player</h2><small id="queueLabel">No video selected</small></div>
 <div class="yt-player" id="player">
 <video id="video" playsinline preload="metadata"></video><div id="seekBack" class="seek-flash left">↶ 10s</div><div id="seekForward" class="seek-flash right">10s ↷</div>
@@ -191,12 +225,116 @@ function render(){
 async function load(){
  if(loading)return;loading=true;
  try{
-  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);render();
+  const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);render();if(!$("reelsPanel").classList.contains("hidden"))renderReels();
   if(data.scanning){say("Loading the rest of your library in the background · "+allItems.length+" found so far.");}
   else{say("Vault ready · "+allItems.length+" files loaded.");if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
   if(data.error)say("Library scan paused: "+data.error+" · Refresh to retry.");
  }catch(e){say(e.message)}finally{loading=false}
 }
+
+/* Reels feed: one active video, three ahead, one behind. */
+let reelItems=[],reelActive=-1,reelNodes=new Map(),reelObserver=null,reelScrollTick=0;
+function isReel(f){return (f.folder||"").replace(/^\/+|\/+$/g,"")==="Reels" && f.ok && isVideo(f)}
+function setVaultTab(tab){
+ const reels=tab==="reels";
+ $("library").classList.toggle("hidden",reels);
+ $("playerPanel").classList.toggle("hidden",reels);
+ $("reelsPanel").classList.toggle("hidden",!reels);
+ $("libraryTab").classList.toggle("active",!reels);
+ $("reelsTab").classList.toggle("active",reels);
+ $("libraryTab").setAttribute("aria-selected",String(!reels));
+ $("reelsTab").setAttribute("aria-selected",String(reels));
+ if(reels){renderReels();if(reelActive<0&&reelItems.length)activateReel(0)}
+}
+$("libraryTab").onclick=()=>setVaultTab("library");
+$("reelsTab").onclick=()=>setVaultTab("reels");
+function makeReelNode(item,index){
+ const slide=document.createElement("article");slide.className="reel-slide";slide.dataset.index=String(index);
+ const video=document.createElement("video");video.playsInline=true;video.loop=true;video.muted=true;video.controls=false;video.preload="none";
+ video.setAttribute("aria-label",item.name);
+ video.addEventListener("click",()=>{if(video.paused)video.play().catch(()=>{});else video.pause()});
+ video.addEventListener("waiting",()=>slide.classList.add("buffering"));
+ video.addEventListener("playing",()=>slide.classList.remove("buffering"));
+ const overlay=document.createElement("div");overlay.className="reel-overlay";
+ const name=document.createElement("div");name.className="reel-name";name.textContent=item.name;
+ const actions=document.createElement("div");actions.className="reel-actions";
+ const mute=document.createElement("button");mute.type="button";mute.textContent="🔇";mute.title="Unmute";mute.setAttribute("aria-label","Toggle sound");
+ mute.onclick=()=>{video.muted=!video.muted;mute.textContent=video.muted?"🔇":"🔊";mute.title=video.muted?"Unmute":"Mute"};
+ const play=document.createElement("button");play.type="button";play.textContent="Ⅱ";play.title="Pause";play.setAttribute("aria-label","Play or pause");
+ play.onclick=()=>{if(video.paused){video.play().catch(()=>{});play.textContent="Ⅱ";play.title="Pause"}else{video.pause();play.textContent="▶";play.title="Play"}};
+ video.addEventListener("play",()=>{play.textContent="Ⅱ";play.title="Pause"});
+ video.addEventListener("pause",()=>{play.textContent="▶";play.title="Play"});
+ actions.append(mute,play);overlay.append(name,actions);slide.append(video,overlay);
+ return slide;
+}
+function ensureReelWindow(center){
+ const feed=$("reelFeed"),lo=Math.max(0,center-1),hi=Math.min(reelItems.length-1,center+3);
+ for(let i=lo;i<=hi;i++){
+  if(!reelNodes.has(i)){
+   const node=makeReelNode(reelItems[i],i);reelNodes.set(i,node);
+   const next=[...reelNodes.keys()].filter(k=>k>i).sort((a,b)=>a-b)[0];
+   if(next!==undefined)feed.insertBefore(node,reelNodes.get(next));else feed.append(node);
+  }
+  const v=reelNodes.get(i).querySelector("video");
+  if(!v.src){v.src=auth("/api/stream/"+encodeURIComponent(reelItems[i].id));v.load()}
+  v.preload=i===center?"auto":(i>center?"auto":"metadata");
+ }
+ for(const [i,node] of [...reelNodes.entries()]){
+  if(i<lo||i>hi){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load();node.remove();reelNodes.delete(i)}
+ }
+}
+function activateReel(index){
+ if(index<0||index>=reelItems.length)return;
+ reelActive=index;ensureReelWindow(index);
+ for(const [i,node] of reelNodes){
+  const v=node.querySelector("video");
+  if(i===index){v.muted=false;const mute=node.querySelector(".reel-actions button");mute.textContent="🔊";mute.title="Mute";v.play().catch(()=>{v.muted=true;mute.textContent="🔇";mute.title="Unmute"})}
+  else v.pause();
+ }
+ $("reelStatus").textContent=(index+1)+" of "+reelItems.length+" · Reels";
+}
+function renderReels(){
+ reelItems=allItems.filter(isReel).sort((a,b)=>(a.t||0)-(b.t||0));
+ $("reelCount").textContent=reelItems.length?" · "+reelItems.length:"";
+ if(reelActive>=reelItems.length)reelActive=reelItems.length-1;
+ if(!reelItems.length){
+  for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
+  reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Your Reels folder is empty.<br>Choose videos above to add your first reels.</div>';
+  $("reelStatus").textContent="Videos uploaded here are stored in your encrypted Reels folder.";reelActive=-1;return;
+ }
+ if(reelNodes.size===0){$("reelFeed").innerHTML="";reelActive=-1;ensureReelWindow(0)}
+ else ensureReelWindow(Math.max(0,reelActive));
+}
+function nearestReel(){
+ const feed=$("reelFeed"),slides=[...feed.querySelectorAll(".reel-slide")];if(!slides.length)return;
+ const mid=feed.getBoundingClientRect().top+feed.clientHeight/2;
+ let best=slides[0],dist=Infinity;
+ for(const slide of slides){const r=slide.getBoundingClientRect(),d=Math.abs((r.top+r.bottom)/2-mid);if(d<dist){best=slide;dist=d}}
+ const idx=Number(best.dataset.index);if(Number.isInteger(idx)&&idx!==reelActive)activateReel(idx);
+}
+$("reelFeed").addEventListener("scroll",()=>{
+ if(reelScrollTick)return;
+ reelScrollTick=requestAnimationFrame(()=>{reelScrollTick=0;nearestReel()});
+},{passive:true});
+$("uploadReels").onclick=async()=>{
+ const fs=[...$("reelFiles").files].filter(f=>f.type.startsWith("video/")||/\.(mp4|m4v|webm|mov|ogv)$/i.test(f.name));
+ if(!fs.length){$("reelStatus").textContent="Choose one or more video files first.";return}
+ $("uploadReels").disabled=true;
+ try{
+  for(let fi=0;fi<fs.length;fi++){
+   const f=fs[fi];$("reelStatus").textContent="Uploading "+f.name+" ("+(fi+1)+"/"+fs.length+")…";
+   const start=await(await api(auth("/api/upload/start"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:f.name,folder:"Reels",size:f.size,type:f.type||"video/mp4"})})).json();
+   for(let i=0;i<start.n;i++){
+    const chunk=f.slice(i*start.chunk,Math.min(f.size,(i+1)*start.chunk));
+    await api(auth("/api/upload/chunk?id="+encodeURIComponent(start.id)+"&i="+i),{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:await chunk.arrayBuffer()});
+    $("reelStatus").textContent="Uploading "+f.name+" · "+Math.round((i+1)/start.n*100)+"% ("+(fi+1)+"/"+fs.length+")";
+   }
+  }
+  $("reelFiles").value="";await load();setVaultTab("reels");renderReels();$("reelStatus").textContent="Added "+fs.length+" video"+(fs.length===1?"":"s")+" to Reels.";
+ }catch(e){$("reelStatus").textContent="Upload stopped: "+e.message}
+ finally{$("uploadReels").disabled=false}
+};
+
 $("unlock").onclick=async()=>{
  try{loginSay("Checking password…");$("unlock").disabled=true;
   const r=await api("/api/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({p:$("password").value})});
@@ -280,7 +418,7 @@ $("lock").onclick=async()=>{
  try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}
  token="";if(pollTimer)clearInterval(pollTimer);pollTimer=null;
  $("video").pause();$("video").removeAttribute("src");$("video").querySelectorAll("track").forEach(t=>t.remove());if(subtitleObjectUrl){URL.revokeObjectURL(subtitleObjectUrl);subtitleObjectUrl=""}$("video").load();$("captionMenu").innerHTML="";
- allItems=[];playQueue=[];currentIndex=-1;$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";loginSay("Vault locked.")
+ allItems=[];playQueue=[];currentIndex=-1;for(const node of reelNodes.values()){const rv=node.querySelector("video");rv.pause();rv.removeAttribute("src");rv.load()}reelNodes.clear();reelItems=[];reelActive=-1;$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";loginSay("Vault locked.")
 };
 $("upload").onclick=async()=>{
  const selected=[...$("files").files,...$("folders").files];const fs=[...new Map(selected.map(f=>[f.name+"|"+f.size+"|"+(f.webkitRelativePath||""),f])).values()];
