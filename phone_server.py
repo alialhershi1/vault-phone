@@ -207,8 +207,13 @@ def reels_jobs():
     if not authed():
         abort(403)
     with _REEL_JOB_LOCK:
-        jobs = sorted(_REEL_JOBS.values(), key=lambda item: item.get("created", 0), reverse=True)[:50]
-        return jsonify(jobs=jobs)
+        all_jobs = list(_REEL_JOBS.values())
+        counts = {status: sum(1 for item in all_jobs if item.get("status") == status)
+                  for status in ("queued", "downloading", "storing", "completed", "failed")}
+        counts["active"] = counts["queued"] + counts["downloading"] + counts["storing"]
+        counts["total"] = len(all_jobs)
+        jobs = sorted(all_jobs, key=lambda item: item.get("created", 0), reverse=True)[:50]
+        return jsonify(jobs=jobs, summary=counts)
 
 def authed():
     tok = V.KEY["token"]
