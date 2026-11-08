@@ -72,11 +72,11 @@ function loginSay(s){$("loginStatus").textContent=s}
 function folderName(f){return (f.folder||"").replace(/^\/+|\/+$/g,"")||"Unsorted"}
 function isVideo(f){return (f.type||"").startsWith("video/")||/\.(mp4|m4v|webm|mov|mkv|avi|ogv)$/i.test(f.name||"")}
 function formatSize(n){n=Number(n)||0;if(n<1024*1024)return (n/1024).toFixed(0)+" KB";return (n/1048576).toFixed(1)+" MB"}
-function baseName(name){return (name||"").replace(/\\.[^.]+$/,"").toLowerCase()}
-function isSrt(f){return /\\.srt$/i.test(f.name||"")}
+function baseName(name){return (name||"").replace(/\.[^.]+$/,"").toLowerCase()}
+function isSrt(f){return /\.srt$/i.test(f.name||"")}
 function srtToVtt(s){
- s=s.replace(/^\\uFEFF/,"").replace(/\\r/g,"").trim();
- return "WEBVTT\\n\\n"+s.replace(/^(\\d+)\\s*\\n/gm,"").replace(/(\\d{2}:\\d{2}:\\d{2}),(\\d{3})/g,"$1.$2").replace(/\\n{3,}/g,"\\n\\n");
+ s=s.replace(/^\uFEFF/,"").replace(/\r/g,"").trim();
+ return "WEBVTT\n\n"+s.replace(/^(\d+)\s*\n/gm,"").replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g,"$1.$2").replace(/\n{3,}/g,"\n\n");
 }
 async function setSubtitle(fid){
  const v=$("video");for(const t of [...v.querySelectorAll("track")])t.remove();
