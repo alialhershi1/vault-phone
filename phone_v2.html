@@ -12,19 +12,29 @@ button.secondary{background:#354252}.toolbar{display:flex;gap:8px;flex-wrap:wrap
 .item{padding:11px 3px;border-bottom:1px solid #303b49;display:flex;gap:12px;align-items:center;justify-content:space-between}
 .item:last-child{border-bottom:0}.item-name{min-width:0;overflow-wrap:anywhere}.item-actions{flex-shrink:0}
 small,.muted{color:#9eabb9}.hidden{display:none!important}
-.yt-player{position:relative;background:#000;border-radius:12px;overflow:hidden;margin-top:12px}
-#video{display:block;width:100%;max-height:68vh;background:#000;cursor:pointer}
-.yt-controls{position:absolute;left:0;right:0;bottom:0;padding:34px 12px 10px;background:linear-gradient(transparent,rgba(0,0,0,.88));opacity:1;transition:opacity .2s}
+.yt-player{position:relative;background:#000;border-radius:12px;overflow:hidden;margin-top:12px;isolation:isolate}
+#video{display:block;width:100%;height:auto;max-height:68vh;background:#000;object-fit:contain;cursor:pointer}
+.yt-controls{position:absolute;z-index:10;left:0;right:0;bottom:0;padding:38px 13px 12px;background:linear-gradient(transparent,rgba(0,0,0,.94));opacity:1;pointer-events:auto}
 .yt-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-.yt-controls button{background:transparent;color:#fff;padding:5px 7px;margin:0;font-size:15px}
+.yt-controls button{background:transparent;color:#fff;padding:8px 9px;margin:0;font-size:16px;min-width:36px;min-height:38px;touch-action:manipulation}
 .yt-controls button:hover{background:#ffffff22}
 .yt-controls input[type=range]{accent-color:#f00;padding:0;margin:0}
-#seek{width:100%;height:4px;cursor:pointer;margin:0 0 9px}
+#seek{display:block;width:100%;height:6px;cursor:pointer;margin:0 0 10px;touch-action:pan-y}
 #volume{width:75px}
 #time{font-size:12px;color:#eee;white-space:nowrap}
-#captions{max-width:170px;padding:5px;background:#171717;border:1px solid #555}
 .yt-spacer{flex:1}
-@media(max-width:520px){.yt-controls{padding:25px 7px 7px}.yt-row{gap:5px}#volume{width:48px}#captions{max-width:112px;font-size:12px}}
+#captionMenu{display:none;position:absolute;z-index:30;right:12px;bottom:70px;min-width:210px;max-width:calc(100% - 24px);max-height:45%;overflow:auto;padding:8px;background:#20242b;border:1px solid #626a75;border-radius:10px;box-shadow:0 8px 28px #000a;pointer-events:auto}
+#captionMenu.open{display:block}
+#captionMenu button{display:block;width:100%;text-align:left;padding:11px 12px;min-height:42px;border-radius:7px}
+#captionMenu button.active{background:#354d70}
+#fullscreen:focus-visible,#ccButton:focus-visible{outline:2px solid white;outline-offset:2px}
+#player:fullscreen,#player:-webkit-full-screen{width:100vw;height:100vh;height:100dvh;max-width:none;margin:0;border-radius:0;display:flex;align-items:center;justify-content:center;background:#000;overflow:hidden}
+#player:fullscreen #video,#player:-webkit-full-screen #video{width:100%;height:100%;max-height:none;object-fit:contain}
+#player:fullscreen .yt-controls,#player:-webkit-full-screen .yt-controls{position:absolute;z-index:20;left:0;right:0;bottom:0;padding:54px 16px max(16px,env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.96));}
+#player:fullscreen #captionMenu,#player:-webkit-full-screen #captionMenu{z-index:40;bottom:calc(76px + env(safe-area-inset-bottom));}
+#player:fullscreen~*{display:none}
+@media(max-width:600px){.yt-controls{padding:28px 8px 8px}.yt-row{gap:3px}.yt-controls button{min-width:34px;min-height:42px;padding:7px 6px}#volume{width:50px}#time{font-size:11px}#player:fullscreen .yt-controls,#player:-webkit-full-screen .yt-controls{padding:48px 8px max(12px,env(safe-area-inset-bottom))}}
+
 #status{white-space:pre-wrap;color:#93c5fd;margin-top:9px;min-height:1.3em}
 .group{border:1px solid #303b49;border-radius:10px;margin:9px 0;overflow:hidden}
 .group summary{padding:12px 13px;background:#151c25;cursor:pointer;font-weight:600;display:flex;justify-content:space-between;gap:12px}
@@ -49,13 +59,13 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <div class="player-head"><h2 id="playing">Player</h2><small id="queueLabel">No video selected</small></div>
 <div class="yt-player" id="player">
 <video id="video" playsinline preload="metadata"></video>
-<div class="yt-controls">
+<div id="captionMenu" aria-label="Subtitle tracks"></div><div class="yt-controls">
 <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
 <div class="yt-row">
 <button id="playPause" aria-label="Play or pause">▶</button>
 <button id="mute" aria-label="Mute">🔊</button><input id="volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
 <span id="time">0:00 / 0:00</span><span class="yt-spacer"></span>
-<label class="muted" style="font-size:12px">CC <select id="captions"><option value="">Off</option></select></label>
+<button id="ccButton" aria-label="Subtitles" title="Subtitles">CC</button>
 <label class="muted" style="font-size:12px">Speed <select id="speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label>
 <button id="previous" disabled title="Previous video">⏮</button><button id="next" disabled title="Next video">⏭</button>
 <button id="fullscreen" title="Fullscreen">⛶</button>
@@ -78,26 +88,41 @@ function srtToVtt(s){
  s=s.replace(/^\uFEFF/,"").replace(/\r/g,"").trim();
  return "WEBVTT\n\n"+s.replace(/^(\d+)\s*\n/gm,"").replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g,"$1.$2").replace(/\n{3,}/g,"\n\n");
 }
+let subtitleObjectUrl="";
 async function setSubtitle(fid){
- const v=$("video");for(const t of [...v.querySelectorAll("track")])t.remove();
- if(!fid){$("captions").value="";return}
+ const v=$("video");
+ for(const t of [...v.querySelectorAll("track")])t.remove();
+ if(subtitleObjectUrl){URL.revokeObjectURL(subtitleObjectUrl);subtitleObjectUrl=""}
+ [...$("captionMenu").querySelectorAll("button")].forEach(b=>b.classList.toggle("active",b.dataset.fid===fid));
+ if(!fid){$("captionMenu").classList.remove("open");return}
  try{
-  const r=await fetch(auth("/api/stream/"+encodeURIComponent(fid)));if(!r.ok)throw new Error("Subtitle file unavailable");
-  const vtt=srtToVtt(await r.text());const blob=new Blob([vtt],{type:"text/vtt"});const url=URL.createObjectURL(blob);
-  const track=document.createElement("track");track.kind="subtitles";track.label="Subtitles";track.srclang="en";track.src=url;track.default=true;v.append(track);
-  track.addEventListener("load",()=>{if(v.textTracks.length)v.textTracks[0].mode="showing"});
-  setTimeout(()=>{if(v.textTracks.length)v.textTracks[0].mode="showing"},250);
-  $("captions").value=fid;
+  const r=await fetch(auth("/api/stream/"+encodeURIComponent(fid)));
+  if(!r.ok)throw new Error("Subtitle file unavailable");
+  const raw=await r.text();
+  const vtt=srtToVtt(raw);
+  subtitleObjectUrl=URL.createObjectURL(new Blob([vtt],{type:"text/vtt"}));
+  const track=document.createElement("track");
+  track.kind="subtitles";track.label="Subtitles";track.srclang="en";track.src=subtitleObjectUrl;
+  v.append(track);
+  track.addEventListener("load",()=>{if(v.textTracks.length)v.textTracks[v.textTracks.length-1].mode="showing"});
+  track.track.mode="showing";
+  $("captionMenu").classList.remove("open");
  }catch(e){say("Could not load subtitles: "+e.message)}
 }
 function populateSubtitles(video){
- const sel=$("captions");sel.innerHTML='<option value="">Off</option>';
+ const menu=$("captionMenu");menu.innerHTML="";
+ const off=document.createElement("button");off.type="button";off.textContent="Subtitles off";off.dataset.fid="";off.onclick=()=>setSubtitle("");menu.append(off);
  const srts=allItems.filter(x=>x.ok&&isSrt(x));
  const matching=srts.filter(x=>baseName(x.name)===baseName(video.name));
  const options=matching.length?matching:srts;
- for(const f of options){const o=document.createElement("option");o.value=f.id;o.textContent=f.name;sel.append(o)}
- sel.disabled=!options.length;
- if(matching.length===1)setSubtitle(matching[0].id);else setSubtitle("");
+ for(const f of options){
+  const btn=document.createElement("button");btn.type="button";btn.textContent=f.name;btn.dataset.fid=f.id;
+  btn.onclick=()=>setSubtitle(f.id);menu.append(btn);
+ }
+ $("ccButton").disabled=!options.length;
+ $("ccButton").title=options.length?options.length+" subtitle file(s) available":"No SRT files in library";
+ if(matching.length===1)setSubtitle(matching[0].id);
+ else setSubtitle("");
 }
 function fmtTime(s){if(!Number.isFinite(s))return "0:00";const h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);return h?h+":"+String(m).padStart(2,"0")+":"+String(sec).padStart(2,"0"):m+":"+String(sec).padStart(2,"0")}
 function syncControls(){
@@ -163,14 +188,25 @@ vid.addEventListener("timeupdate",syncControls);vid.addEventListener("durationch
 $("seek").oninput=()=>{if(vid.duration)vid.currentTime=Number($("seek").value)/1000*vid.duration};
 $("mute").onclick=()=>{vid.muted=!vid.muted;syncControls()};
 $("volume").oninput=()=>{vid.volume=Number($("volume").value);vid.muted=vid.volume===0;syncControls()};
-$("captions").onchange=()=>setSubtitle($("captions").value);
-$("fullscreen").onclick=()=>{const p=$("player");if(document.fullscreenElement)document.exitFullscreen();else if(p.requestFullscreen)p.requestFullscreen()};
+$("ccButton").onclick=()=>{$("captionMenu").classList.toggle("open")};
+$("fullscreen").onclick=async()=>{
+ const p=$("player");
+ try{
+  if(document.fullscreenElement||document.webkitFullscreenElement){if(document.exitFullscreen)await document.exitFullscreen();else if(document.webkitExitFullscreen)document.webkitExitFullscreen()}
+  else if(p.requestFullscreen)await p.requestFullscreen();
+  else if(p.webkitRequestFullscreen)p.webkitRequestFullscreen();
+  else if(vid.webkitEnterFullscreen)vid.webkitEnterFullscreen();
+ }catch(e){say("Fullscreen is not supported by this browser.")}
+};
+document.addEventListener("fullscreenchange",()=>{$("fullscreen").textContent=document.fullscreenElement?"⛶":"⛶"});
+document.addEventListener("keydown",e=>{if(e.key==="Escape")$("captionMenu").classList.remove("open")});
+document.addEventListener("click",e=>{if(!$("captionMenu").contains(e.target)&&e.target!==$("ccButton"))$("captionMenu").classList.remove("open")});
 $("video").addEventListener("ended",()=>moveQueue(1));
 $("speed").onchange=()=>{vid.playbackRate=Number($("speed").value)};
 $("lock").onclick=async()=>{
  try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}
  token="";if(pollTimer)clearInterval(pollTimer);pollTimer=null;
- $("video").pause();$("video").removeAttribute("src");$("video").querySelectorAll("track").forEach(t=>t.remove());$("video").load();$("captions").innerHTML='<option value="">Off</option>';
+ $("video").pause();$("video").removeAttribute("src");$("video").querySelectorAll("track").forEach(t=>t.remove());if(subtitleObjectUrl){URL.revokeObjectURL(subtitleObjectUrl);subtitleObjectUrl=""}$("video").load();$("captionMenu").innerHTML="";
  allItems=[];playQueue=[];currentIndex=-1;$("app").classList.add("hidden");$("login").classList.remove("hidden");$("password").value="";loginSay("Vault locked.")
 };
 $("upload").onclick=async()=>{
