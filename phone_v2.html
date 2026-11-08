@@ -128,6 +128,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 </div>
 <div id="reelsPanel" class="panel hidden">
 <div class="reels-head"><div><h2>Reels</h2><small class="muted">Server vault · swipe vertically</small></div><div class="reels-upload">
+<button id="shuffleReels" class="secondary" type="button" title="Shuffle the Reels feed">Shuffle</button>
 <input id="reelFiles" type="file" accept="video/*,.mp4,.m4v,.webm,.mov,.ogv" multiple aria-label="Choose reels">
 <button id="uploadReels" type="button">Add from phone</button>
 </div></div>
@@ -297,7 +298,7 @@ async function load(){
  try{
   const data=await(await api(auth("/api/library"))).json();allItems=Array.isArray(data)?data:(data.items||[]);
   try{const gd=await(await api(auth("/api/groups"))).json();customGroups=gd.groups||[];fileGroups=gd.assignments||{}}catch(e){}
-  render();if(!$("reelsPanel").classList.contains("hidden")){renderReels();scanReelDurations();}
+  render();if(!$("reelsPanel").classList.contains("hidden")){renderReels();if(!reelItems.length)scanReelDurations(true);}
   if(data.scanning){say("Loading the rest of your library in the background · "+allItems.length+" found so far.");}
   else{say("Vault ready · "+allItems.length+" files loaded.");if(pollTimer){clearInterval(pollTimer);pollTimer=null;}}
   if(data.error)say("Library scan paused: "+data.error+" · Refresh to retry.");
@@ -319,17 +320,41 @@ function setReelSpeed(enabled){
  for(const node of reelNodes.values()){const video=node.querySelector("video"),button=node.querySelector(".reel-speed");if(button){button.textContent=reelSpeed2x?"2×":"1×";button.classList.toggle("speed-active",reelSpeed2x);button.title=reelSpeed2x?"Switch to normal speed":"Play at 2x speed"}animateReelSpeed(video,reelSpeed2x?2:1)}
 }
 const reelDurationCache=new Map();
-let reelDurationScanRunning=false;
+const REEL_BATCH_SIZE=12;
+let reelDurationScanRunning=false,reelCandidateList=[],reelCandidateCursor=0,reelCandidateKey="",reelShuffle=false;
 function isReel(f){const d=reelDurationCache.get(f?.id);return !!(f&&f.ok&&isVideo(f)&&Number.isFinite(d)&&d>0&&d<900)}
-async function scanReelDurations(){
+function shuffleList(list){
+ const out=[...list];
+ for(let i=out.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[out[i],out[j]]=[out[j],out[i]]}
+ return out;
+}
+function prepareReelCandidates(){
+ const base=allItems.filter(f=>f.ok&&isVideo(f)).sort((a,b)=>(b.t||0)-(a.t||0));
+ const key=base.map(f=>f.id).join("|");
+ if(key!==reelCandidateKey){
+  reelCandidateKey=key;
+  reelCandidateList=reelShuffle?shuffleList(base):base;
+  reelCandidateCursor=0;
+  while(reelCandidateCursor<reelCandidateList.length&&reelDurationCache.has(reelCandidateList[reelCandidateCursor].id))reelCandidateCursor++;
+ }
+}
+async function scanReelDurations(initial=false){
  if(reelDurationScanRunning)return;
+ prepareReelCandidates();
+ if(!initial&&reelItems.length-reelActive>3)return;
+ const batch=[];
+ while(reelCandidateCursor<reelCandidateList.length&&batch.length<REEL_BATCH_SIZE){
+  const f=reelCandidateList[reelCandidateCursor++];
+  if(!reelDurationCache.has(f.id))batch.push(f);
+ }
+ if(!batch.length){renderReels();return}
  reelDurationScanRunning=true;
+ $("reelStatus").textContent="Loading the next "+batch.length+" Reels…";
  try{
-  const pending=allItems.filter(f=>f.ok&&isVideo(f)&&!reelDurationCache.has(f.id));
-  let cursor=0,checked=0;
+  let cursor=0;
   async function worker(){
-   while(cursor<pending.length){
-    const f=pending[cursor++];
+   while(cursor<batch.length){
+    const f=batch[cursor++];
     const v=document.createElement("video");
     v.preload="metadata";v.muted=true;v.src=auth("/api/stream/"+encodeURIComponent(f.id));
     try{
@@ -342,19 +367,17 @@ async function scanReelDurations(){
       v.load();
      });
      reelDurationCache.set(f.id,duration!==null&&duration>0?duration:Infinity);
-     if(!$("reelsPanel").classList.contains("hidden"))renderReels();
-    }finally{
-     v.pause();v.removeAttribute("src");v.load();
-     checked++;
-     $("reelStatus").textContent="Checking video lengths · "+checked+" of "+pending.length;
-    }
+    }finally{v.pause();v.removeAttribute("src");v.load()}
    }
   }
-  await worker();
+  await Promise.all([worker(),worker(),worker()]);
  }finally{
   reelDurationScanRunning=false;
   renderReels();
-  if($("reelsPanel")&&!$("reelsPanel").classList.contains("hidden"))activateReel(reelActive<0?0:reelActive);
+  if($("reelsPanel")&&!$("reelsPanel").classList.contains("hidden")){
+   if(reelActive<0&&reelItems.length)activateReel(0);
+   if(!reelItems.length&&reelCandidateCursor<reelCandidateList.length)scanReelDurations(true);
+  }
  }
 }
 function setVaultTab(tab){
@@ -367,7 +390,7 @@ function setVaultTab(tab){
  $("reelsTab").classList.toggle("active",reels);
  $("libraryTab").setAttribute("aria-selected",String(!reels));
  $("reelsTab").setAttribute("aria-selected",String(reels));
- if(reels){renderReels();scanReelDurations();refreshReelJobs();if(reelActive<0&&reelItems.length)activateReel(0)}
+ if(reels){renderReels();if(!reelItems.length)scanReelDurations(true);refreshReelJobs();if(reelActive<0&&reelItems.length)activateReel(0)}
 }
 $("libraryTab").onclick=()=>setVaultTab("library");
 $("reelsTab").onclick=()=>setVaultTab("reels");
@@ -453,19 +476,22 @@ function syncReelFullscreen(){
 document.addEventListener("fullscreenchange",syncReelFullscreen);
 document.addEventListener("webkitfullscreenchange",syncReelFullscreen);
 function renderReels(){
+ prepareReelCandidates();
  const previousId=reelItems[reelActive]?.id||"";
- const nextItems=allItems.filter(isReel).sort((a,b)=>(b.t||0)-(a.t||0));
+ const nextItems=reelCandidateList.filter(isReel);
  const changed=nextItems.length!==reelItems.length||nextItems.some((x,i)=>x.id!==reelItems[i]?.id);
  const appendOnly=nextItems.length>=reelItems.length&&reelItems.every((x,i)=>nextItems[i]?.id===x.id);
  const rebuild=changed&&!appendOnly;
  const needsActivation=reelActive<0&&nextItems.length>0;
  reelItems=nextItems;
- $("reelCount").textContent=reelItems.length?" · "+reelItems.length:"";
+ $("reelCount").textContent=reelItems.length?" · "+reelItems.length+(reelCandidateCursor<reelCandidateList.length?" loaded":""):"";
  if(!reelItems.length){
-  const checking=allItems.some(f=>f.ok&&isVideo(f)&&!reelDurationCache.has(f.id));
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
-  reelNodes.clear();$("reelFeed").innerHTML='<div class="reel-empty">Finding videos shorter than 15 minutes in your server vault…</div>';
-  $("reelStatus").textContent=checking?"Checking video lengths to find videos shorter than 15 minutes…":"No videos shorter than 15 minutes were found. Phone uploads are optional.";reelActive=-1;return;
+  reelNodes.clear();
+  $("reelFeed").innerHTML='<div class="reel-empty">'+(reelCandidateList.length?'Loading your first 12 Reels…':'No videos are available in your vault yet.')+'</div>';
+  if(!reelDurationScanRunning&&reelCandidateCursor<reelCandidateList.length)$("reelStatus").textContent="Preparing the first 12 Reels…";
+  else if(!reelCandidateList.length)$("reelStatus").textContent="No videos found in your server vault.";
+  reelActive=-1;return;
  }
  if(rebuild){
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
@@ -485,8 +511,22 @@ function nearestReel(){
 }
 $("reelFeed").addEventListener("scroll",()=>{
  if(reelScrollTick)return;
- reelScrollTick=requestAnimationFrame(()=>{reelScrollTick=0;nearestReel()});
+ reelScrollTick=requestAnimationFrame(()=>{
+  reelScrollTick=0;nearestReel();
+  if(reelItems.length-reelActive<=3&&reelCandidateCursor<reelCandidateList.length)scanReelDurations();
+ });
 },{passive:true});
+$("shuffleReels").onclick=()=>{
+ reelShuffle=!reelShuffle;
+ $("shuffleReels").textContent=reelShuffle?"Shuffle: On":"Shuffle";
+ $("shuffleReels").classList.toggle("speed-active",reelShuffle);
+ reelCandidateKey="";
+ prepareReelCandidates();
+ reelNodes.clear();$("reelFeed").innerHTML="";
+ reelActive=-1;reelItems=[];
+ renderReels();
+ if(reelCandidateCursor<reelCandidateList.length)scanReelDurations(true);
+};
 function renderReelJobs(){
  const root=$("reelJobs");root.innerHTML="";
  for(const job of reelJobs.slice(0,20)){
