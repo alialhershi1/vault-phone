@@ -240,9 +240,9 @@ function setVolume(value){
  $("mute").textContent=value===0?"🔇":"🔊";
 }
 $("playPause").onclick=()=>togglePlayback();
-vid.addEventListener("click",()=>{
+vid.addEventListener("click",(e)=>{
  const now=Date.now();
- if(now-lastTapAt<300){if(singleTapTimer)clearTimeout(singleTapTimer);singleTapTimer=null;lastTapAt=0;const rect=vid.getBoundingClientRect();seekBy(10, event.clientX<rect.left+rect.width/2?-1:1);return}
+ if(now-lastTapAt<300){if(singleTapTimer)clearTimeout(singleTapTimer);singleTapTimer=null;lastTapAt=0;const rect=vid.getBoundingClientRect();seekBy(10, e.clientX<rect.left+rect.width/2?-1:1);return}
  lastTapAt=now;
  if(singleTapTimer)clearTimeout(singleTapTimer);
  singleTapTimer=setTimeout(()=>{singleTapTimer=null;togglePlayback()},260);
