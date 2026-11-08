@@ -320,8 +320,8 @@ function setReelSpeed(enabled){
  for(const node of reelNodes.values()){const video=node.querySelector("video"),button=node.querySelector(".reel-speed");if(button){button.textContent=reelSpeed2x?"2×":"1×";button.classList.toggle("speed-active",reelSpeed2x);button.title=reelSpeed2x?"Switch to normal speed":"Play at 2x speed"}animateReelSpeed(video,reelSpeed2x?2:1)}
 }
 const reelDurationCache=new Map();
-const REEL_BATCH_SIZE=12;
-let reelDurationScanRunning=false,reelCandidateList=[],reelCandidateCursor=0,reelCandidateKey="",reelShuffle=false,reelLoadTarget=12;
+const REEL_BATCH_SIZE=10;
+let reelDurationScanRunning=false,reelCandidateList=[],reelCandidateCursor=0,reelCandidateKey="",reelShuffle=false,reelLoadTarget=10;
 function isReel(f){const d=reelDurationCache.get(f?.id);return !!(f&&f.ok&&isVideo(f)&&Number.isFinite(d)&&d>0&&d<900)}
 function shuffleList(list){
  const out=[...list];
@@ -429,7 +429,7 @@ function makeReelNode(item,index){
  return slide;
 }
 function ensureReelWindow(center){
- const feed=$("reelFeed"),lo=Math.max(0,center-1),hi=Math.min(reelItems.length-1,center+2);
+ const feed=$("reelFeed"),lo=Math.max(0,center-3),hi=Math.min(reelItems.length-1,center+2);
  for(let i=lo;i<=hi;i++){
   if(!reelNodes.has(i)){
    const node=makeReelNode(reelItems[i],i);reelNodes.set(i,node);
@@ -492,7 +492,7 @@ function renderReels(){
  if(!reelItems.length){
   for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
   reelNodes.clear();
-  $("reelFeed").innerHTML='<div class="reel-empty">'+(reelCandidateList.length?'Loading your first 12 Reels…':'No videos are available in your vault yet.')+'</div>';
+  $("reelFeed").innerHTML='<div class="reel-empty">'+(reelCandidateList.length?'Loading your first 10 Reels…':'No videos are available in your vault yet.')+'</div>';
   if(!reelDurationScanRunning&&reelCandidateCursor<reelCandidateList.length)$("reelStatus").textContent="Preparing the first 12 Reels…";
   else if(!reelCandidateList.length)$("reelStatus").textContent="No videos found in your server vault.";
   reelActive=-1;return;
@@ -517,7 +517,7 @@ $("reelFeed").addEventListener("scroll",()=>{
  if(reelScrollTick)return;
  reelScrollTick=requestAnimationFrame(()=>{
   reelScrollTick=0;nearestReel();
-  if(reelItems.length-reelActive<=3&&reelCandidateCursor<reelCandidateList.length){reelLoadTarget=Math.max(reelLoadTarget,reelItems.length+12);scanReelDurations(true)}
+  if(reelItems.length-reelActive<=3&&reelCandidateCursor<reelCandidateList.length){reelLoadTarget=Math.max(reelLoadTarget,reelItems.length+10);scanReelDurations(true)}
  });
 },{passive:true});
 $("shuffleReels").onclick=()=>{
@@ -525,7 +525,7 @@ $("shuffleReels").onclick=()=>{
  $("shuffleReels").textContent=reelShuffle?"Shuffle: On":"Shuffle";
  $("shuffleReels").classList.toggle("speed-active",reelShuffle);
  for(const node of reelNodes.values()){const v=node.querySelector("video");v.pause();v.removeAttribute("src");v.load()}
- reelCandidateList=[];reelCandidateKey="";reelCandidateCursor=0;reelLoadTarget=12;
+ reelCandidateList=[];reelCandidateKey="";reelCandidateCursor=0;reelLoadTarget=10;
  prepareReelCandidates();
  reelNodes.clear();$("reelFeed").innerHTML="";
  reelActive=-1;reelItems=[];
