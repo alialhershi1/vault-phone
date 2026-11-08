@@ -101,7 +101,7 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
     fid = secrets.token_hex(6)
     n = max(1, (size + V.CHUNK - 1) // V.CHUNK)
     t = int(time.time() * 1000)
-    meta = {"name": filename, "folder": "Reels", "type": mime, "size": size, "t": t, "src": src_url}
+    meta = {"name": filename, "folder": "Reels", "kind": "instagram_reel", "type": mime, "size": size, "t": t, "src": src_url}
     created_ids, last_url, ok = [], None, False
     try:
         # Chunks first, meta LAST: the library only lists an entry once it is complete.
@@ -130,7 +130,7 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
             SCAN_FOUND[fid] = {"meta": msg["attachments"][0]["url"], "chunks": chunk_urls, "n": n,
                                "meta_mid": msg.get("id"), "chunk_mids": chunk_mids,
                                "message_ids": list(created_ids)}
-            META_CACHE[fid] = {"id": fid, "name": filename, "folder": "Reels", "type": mime, "size": size, "t": t}
+            META_CACHE[fid] = {"id": fid, "name": filename, "folder": "Reels", "kind": "instagram_reel", "type": mime, "size": size, "t": t}
         with _lock:
             LIB.update(t=0, items=[])
         _save_library_cache()
@@ -374,7 +374,12 @@ def library():
         fid, f = kv
         with SCAN_LOCK:
             cached = META_CACHE.get(fid)
-        if cached is None:
+        # Older entries marked as Reels may actually be ordinary uploaded files.
+        # Re-read their encrypted metadata once so legacy Instagram downloads can
+        # be identified by their saved source URL rather than by folder or size.
+        needs_legacy_check = bool(cached and str(cached.get("folder") or "").strip().lower() == "reels"
+                                 and not cached.get("kind"))
+        if cached is None or needs_legacy_check:
             try:
                 meta_url = f.get("meta")
                 if not meta_url and f.get("meta_mid"):
@@ -386,12 +391,15 @@ def library():
                 r = requests.get(meta_url, timeout=15)
                 r.raise_for_status()
                 m = json.loads(V.KEY["aes"].decrypt(r.content[:12], r.content[12:], None))
+                src = str(m.get("src") or "")
+                kind = m.get("kind") or ("instagram_reel" if "instagram.com/" in src and "/reel/" in src else "")
                 cached = {"id": fid, "name": m.get("name", "?"), "folder": m.get("folder") or "",
-                          "type": m.get("type") or "", "size": m.get("size", 0), "t": m.get("t", 0)}
+                          "kind": kind, "type": m.get("type") or "", "size": m.get("size", 0), "t": m.get("t", 0)}
                 with SCAN_LOCK:
                     META_CACHE[fid] = cached
             except Exception:
-                return None
+                if cached is None:
+                    return None
         item = dict(cached)
         item["ok"] = len(f.get("chunks") or {}) == f["n"] or len(f.get("chunk_mids") or {}) == f["n"]
         return item
