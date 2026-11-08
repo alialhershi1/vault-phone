@@ -220,8 +220,30 @@ def _process(job):
         cookies = os.environ.get("IG_COOKIES", "").strip()
         if cookies:
             cf = os.path.join(temp_dir, "cookies.txt")
-            with open(cf, "w") as fh:
-                fh.write(cookies + "\n")
+            # Render may contain either a Netscape cookie export or a browser
+            # Cookie header (name=value; name2=value2). yt-dlp only accepts
+            # Netscape's seven-column tab-separated cookie-file format.
+            if "\\t" in cookies and ("# Netscape HTTP Cookie File" in cookies or
+                                      any(line.count("\\t") >= 6 for line in cookies.splitlines())):
+                cookie_text = cookies.rstrip() + "\\n"
+            else:
+                pairs = []
+                for part in cookies.replace("\\r", "").replace("\\n", ";").split(";"):
+                    part = part.strip()
+                    if not part or "=" not in part:
+                        continue
+                    name, value = part.split("=", 1)
+                    name, value = name.strip(), value.strip()
+                    if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+                        continue
+                    if not value:
+                        continue
+                    pairs.append(".instagram.com\\tTRUE\\t/\\tTRUE\\t0\\t%s\\t%s" % (name, value))
+                if not pairs:
+                    raise RuntimeError("IG_COOKIES is not a valid browser Cookie header or Netscape cookie export.")
+                cookie_text = "# Netscape HTTP Cookie File\\n" + "\\n".join(pairs) + "\\n"
+            with open(cf, "w", encoding="utf-8") as fh:
+                fh.write(cookie_text)
             options["cookiefile"] = cf
         with yt_dlp.YoutubeDL(options) as dl:
             info = dl.extract_info(job["url"], download=True)
