@@ -30,7 +30,7 @@ ASSIGN_RECORDS = {}
 # Instagram Reel downloads run on the server; the browser sends URLs only.
 _REEL_JOBS = {}
 _REEL_JOB_LOCK = threading.RLock()
-_REEL_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_REEL_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 _REEL_MAX_BYTES = 500 * 1024 * 1024
 
 def _reel_job_update(job_id, **values):
@@ -198,7 +198,8 @@ def reels_download():
                                   "message": "Waiting in server queue…", "title": "Instagram Reel",
                                   "created": now, "updated": now}
             job_ids.append(job_id)
-    _REEL_EXECUTOR.submit(_run_reel_jobs, job_ids)
+    for job_id in job_ids:
+        _REEL_EXECUTOR.submit(_run_reel_jobs, [job_id])
     return jsonify(jobs=[_REEL_JOBS[job_id] for job_id in job_ids])
 
 @app.get("/api/reels/jobs")
