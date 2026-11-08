@@ -135,7 +135,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <div class="reel-link-tools">
 <textarea id="reelLinks" rows="3" placeholder="Paste public Instagram Reel links, one per line" aria-label="Instagram Reel links"></textarea>
 <button id="downloadReels" type="button">Download links to Discord</button>
-<small class="muted">Server-side download · up to 10 links per batch · public Reels only</small>
+<small class="muted">Server-side download · no batch limit · public Reels only</small>
 </div>
 <div id="reelJobs" aria-live="polite"></div>
 <div id="reelStatus">Main feed: videos already stored in your server vault. Phone uploads are optional.</div>
@@ -564,7 +564,6 @@ async function refreshReelJobs(){
 $("downloadReels").onclick=async()=>{
  const urls=$("reelLinks").value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
  if(!urls.length){$("reelStatus").textContent="Paste one or more Instagram Reel links first.";return}
- if(urls.length>10){$("reelStatus").textContent="Please submit up to 10 links at a time.";return}
  $("downloadReels").disabled=true;
  try{
   const data=await(await api(auth("/api/reels/download"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls})})).json();
