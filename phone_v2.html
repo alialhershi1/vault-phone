@@ -133,7 +133,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <button id="uploadReels" type="button">Add from phone</button>
 </div></div>
 <div class="reel-link-tools">
-<textarea id="reelLinks" rows="3" placeholder="Paste public Instagram Reel links, one per line" aria-label="Instagram Reel links"></textarea>
+<textarea id="reelLinks" rows="8" spellcheck="false" placeholder="Paste Reel URLs, multiple links, or the links copied from your Instagram export (JSON / HTML / text)." aria-label="Instagram Reel links"></textarea>
 <button id="downloadReels" type="button">Download links to Discord</button>
 <small class="muted">Server-side download · no batch limit · public Reels only</small>
 </div>
@@ -561,9 +561,22 @@ async function refreshReelJobs(){
   if(reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}
  }finally{reelJobRefreshBusy=false}
 }
+function extractInstagramReelLinks(raw){
+ const text=String(raw||"").replace(/\\u0026/gi,"&").replace(/&amp;/gi,"&");
+ const found=[];
+ const re=/(?:https?:\\/\\/)?(?:www\\.|m\\.)?instagram\\.com\\/(?:reel|reels)\\/[A-Za-z0-9_-]+(?:\\/)?(?:\\?[^\\s"'<>\\]]*)?/gi;
+ for(const match of text.matchAll(re)){
+  let url=match[0].replace(/[),.;]+$/,"");
+  if(!/^https?:\\/\\//i.test(url))url="https://"+url;
+  found.push(url);
+ }
+ return [...new Set(found)];
+}
 $("downloadReels").onclick=async()=>{
- const urls=$("reelLinks").value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
- if(!urls.length){$("reelStatus").textContent="Paste one or more Instagram Reel links first.";return}
+ const raw=$("reelLinks").value;
+ const urls=extractInstagramReelLinks(raw);
+ if(!urls.length){$("reelStatus").textContent="I couldn't find Instagram Reel URLs in that text. Paste the full https://www.instagram.com/reel/… links or the exported JSON/HTML contents.";return}
+ $("reelStatus").textContent="Found "+urls.length+" unique Reel links. Sending them to the server queue…";
  $("downloadReels").disabled=true;
  try{
   const data=await(await api(auth("/api/reels/download"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({urls})})).json();
