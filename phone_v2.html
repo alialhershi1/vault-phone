@@ -117,6 +117,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <div class="tabbar" role="tablist" aria-label="Vault sections">
 <button id="libraryTab" class="active" type="button" role="tab" aria-selected="true">Library</button>
 <button id="reelsTab" type="button" role="tab" aria-selected="false">Reels <span id="reelCount"></span></button>
+<button id="leechTab" type="button" role="tab" aria-selected="false">Vault Leech</button>
 </div>
 <div class="panel" id="libraryTools">
 <div class="toolbar"><button id="refresh">Refresh library</button><button class="secondary" id="lock">Lock vault</button></div>
@@ -132,14 +133,17 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <input id="reelFiles" type="file" accept="video/*,.mp4,.m4v,.webm,.mov,.ogv" multiple aria-label="Choose reels">
 <button id="uploadReels" type="button">Add from phone</button>
 </div></div>
+<div id="reelFeed"><div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div></div>
+</div>
+<div id="leechPanel" class="panel hidden">
+<div class="reels-head"><div><h2>Vault Leech</h2><small class="muted">Instagram downloader · independent queue · saves into your encrypted Reels folder</small></div></div>
 <div class="reel-link-tools">
-<textarea id="reelLinks" rows="8" spellcheck="false" placeholder="Paste Reel URLs, multiple links, or the links copied from your Instagram export (JSON / HTML / text)." aria-label="Instagram Reel links"></textarea>
-<button id="downloadReels" type="button">Download links to Discord</button>
-<small class="muted">Server-side download · no batch limit · public Reels only</small>
+<textarea id="reelLinks" rows="8" spellcheck="false" placeholder="Paste Instagram Reel links or exported JSON / HTML / text." aria-label="Instagram Reel links"></textarea>
+<button id="downloadReels" type="button">Send to Vault Leech</button>
+<small class="muted">Server-side yt-dlp downloads · saved videos appear in Reels</small>
 </div>
 <div id="reelJobs" aria-live="polite"></div>
-<div id="reelStatus">Main feed: videos already stored in your server vault. Phone uploads are optional.</div>
-<div id="reelFeed"><div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div></div>
+<div id="reelStatus">Vault Leech is ready. Add Instagram Reel links to queue downloads.</div>
 </div>
 <div id="library" class="panel"><div class="player-head"><h2>Library</h2><small id="total"></small></div><div class="library-search"><input id="search" type="search" placeholder="Search files and folders"><select id="sizeFilter" aria-label="Filter by file size"><option value="all">All sizes</option><option value="small">Under 500 MB</option><option value="medium">500 MB–2 GB</option><option value="large">2–5 GB</option><option value="huge">Over 5 GB</option></select></div><div class="folder-tools"><input id="newFolder" type="text" maxlength="60" placeholder="New folder name"><button id="createFolder" class="secondary" type="button">+ Folder</button></div><div id="items"></div></div>
 <div class="panel" id="playerPanel">
@@ -344,20 +348,25 @@ function prepareReelCandidates(){
 }
 function scanReelDurations(){prepareReelCandidates();renderReels()}
 function setVaultTab(tab){
- const reels=tab==="reels";
- $("libraryTools").classList.toggle("hidden",reels);
- $("library").classList.toggle("hidden",reels);
- $("playerPanel").classList.toggle("hidden",reels);
+ const library=tab==="library",reels=tab==="reels",leech=tab==="leech";
+ $("libraryTools").classList.toggle("hidden",!library);
+ $("library").classList.toggle("hidden",!library);
+ $("playerPanel").classList.toggle("hidden",!library);
  $("reelsPanel").classList.toggle("hidden",!reels);
- $("libraryTab").classList.toggle("active",!reels);
+ $("leechPanel").classList.toggle("hidden",!leech);
+ $("libraryTab").classList.toggle("active",library);
  $("reelsTab").classList.toggle("active",reels);
- $("libraryTab").setAttribute("aria-selected",String(!reels));
+ $("leechTab").classList.toggle("active",leech);
+ $("libraryTab").setAttribute("aria-selected",String(library));
  $("reelsTab").setAttribute("aria-selected",String(reels));
- if(reels){renderReels();refreshReelJobs();if(reelActive<0&&reelItems.length)activateReel(0);requestAnimationFrame(()=>{const f=$("reelFeed");if(reelActive>=0&&f.clientHeight)f.scrollTop=reelActive*f.clientHeight;const n=reelNodes.get(reelActive);if(n)n.querySelector("video").play().catch(()=>{})})}
- else{for(const n of reelNodes.values())n.querySelector("video").pause()}
+ $("leechTab").setAttribute("aria-selected",String(leech));
+ if(reels){renderReels();if(reelActive<0&&reelItems.length)activateReel(0);requestAnimationFrame(()=>{const f=$("reelFeed");if(reelActive>=0&&f.clientHeight)f.scrollTop=reelActive*f.clientHeight;const n=reelNodes.get(reelActive);if(n)n.querySelector("video").play().catch(()=>{})})}
+ if(leech)refreshReelJobs();
+ if(!reels){for(const n of reelNodes.values())n.querySelector("video").pause()}
 }
 $("libraryTab").onclick=()=>setVaultTab("library");
 $("reelsTab").onclick=()=>setVaultTab("reels");
+$("leechTab").onclick=()=>setVaultTab("leech");
 function makeReelNode(item,index){
  const slide=document.createElement("article");slide.className="reel-slide";slide.dataset.index=String(index);
  const video=document.createElement("video");video.playsInline=true;video.loop=true;video.muted=false;video.defaultMuted=false;video.controls=false;video.preload="none";
