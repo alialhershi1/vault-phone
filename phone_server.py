@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from flask import Flask, abort, jsonify, request, send_from_directory
 import vault_server as V
+import reel_queue as Q  # retained for the encrypted library-index cache
 import vault_leech as Leech
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -754,4 +755,5 @@ def upload_chunk():
         _save_library_cache()
     return "", 204
 
+Q.init()  # keep the existing library-index persistence backend initialized
 Leech.register(app, authed, _store_downloaded_reel, _load_leech_worker_key)
