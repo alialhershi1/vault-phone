@@ -251,7 +251,7 @@ def get_groups():
         try:
             raw = requests.get(url, timeout=15).content
             data = json.loads(V.KEY["aes"].decrypt(raw[:12], raw[12:], None))
-            groups.append({"id": gid, "name": str(data.get("name", "Folder"))})
+            groups.append({"id": gid, "name": str(data.get("name", "Folder")), "color": str(data.get("color", "#64748b"))})
         except Exception:
             continue
     assignments = {}
@@ -278,6 +278,25 @@ def create_group():
     GROUP_RECORDS[gid] = msg["attachments"][0]["url"]
     return jsonify(id=gid, name=name)
 
+@app.post("/api/groups/color")
+def set_group_color():
+    if not authed():
+        abort(403)
+    d = request.get_json(silent=True) or {}
+    gid = str(d.get("id", ""))
+    color = str(d.get("color", "")).lower()
+    allowed = {"#3b82f6", "#ef4444", "#22c55e", "#a855f7", "#f97316",
+               "#eab308", "#ec4899", "#14b8a6", "#06b6d4", "#64748b"}
+    if gid not in GROUP_RECORDS or color not in allowed:
+        return "Folder or color not found.", 400
+    old_url = GROUP_RECORDS[gid]
+    old_raw = requests.get(old_url, timeout=15).content
+    old_data = json.loads(V.KEY["aes"].decrypt(old_raw[:12], old_raw[12:], None))
+    msg = _post_encrypted_record(f"v1g {gid}", {
+        "name": str(old_data.get("name", "Folder")), "color": color
+    }, f"g{gid}.bin")
+    GROUP_RECORDS[gid] = msg["attachments"][0]["url"]
+    return jsonify(id=gid, color=color)
 @app.post("/api/groups/assign")
 def assign_group():
     if not authed():
