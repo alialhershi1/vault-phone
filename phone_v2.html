@@ -246,14 +246,15 @@ function playAt(index){
 function moveQueue(delta){const n=currentIndex+delta;if(n>=0&&n<playQueue.length)playAt(n)}
 function render(){
  const q=$("search").value.trim().toLowerCase(),sizeMode=$("sizeFilter")?.value||"all";
- const filtered=allItems.filter(f=>{
+ const libraryItems=allItems.filter(f=>String(f.folder||"").trim().toLowerCase()!=="reels");
+ const filtered=libraryItems.filter(f=>{
   const size=Number(f.size)||0;
   const sizeOK=sizeMode==="all"||(sizeMode==="small"&&size<500*1048576)||(sizeMode==="medium"&&size>=500*1048576&&size<2*1073741824)||(sizeMode==="large"&&size>=2*1073741824&&size<=5*1073741824)||(sizeMode==="huge"&&size>5*1073741824);
   return sizeOK&&(f.name+" "+folderName(f)).toLowerCase().includes(q);
  });
  const groups=new Map();
  for(const f of filtered){const gid=fileGroups[f.id]||"",key=gid?(customGroups.find(g=>g.id===gid)?.name||"Folder"):folderName(f);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(f)}
- $("items").innerHTML="";$("total").textContent=filtered.length+" of "+allItems.length+" files";
+ $("items").innerHTML="";$("total").textContent=filtered.length+" of "+libraryItems.length+" files";
  if(!filtered.length){$("items").innerHTML='<div class="empty">No matching files.</div>';return}
  for(const [folder,items] of groups){
   const details=document.createElement("details");details.className="group";details.open=!!q||folder==="Unsorted";
@@ -550,10 +551,11 @@ async function refreshReelJobs(){
  reelJobRefreshBusy=true;
  try{
   const data=await(await api(auth("/api/reels/jobs"))).json();
-  const next=data.jobs||[];
+  const next=data.jobs||[],summary=data.summary||{};
   const newlyCompleted=next.some(job=>job.status==="completed"&&!reelJobs.some(old=>old.id===job.id&&old.status==="completed"));
   reelJobs=next;renderReelJobs();
-  const active=reelJobs.some(job=>["queued","downloading","storing"].includes(job.status));
+  if(summary.total!==undefined)$("reelStatus").textContent="Reel downloads · "+summary.completed+" saved · "+summary.failed+" failed · "+summary.active+" remaining · "+summary.total+" submitted";
+  const active=Number(summary.active||0)>0||next.some(job=>["queued","downloading","storing"].includes(job.status));
   if(active&&!reelJobPoll)reelJobPoll=setInterval(refreshReelJobs,2200);
   if(!active&&reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}
   if(newlyCompleted)await load();
