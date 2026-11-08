@@ -59,7 +59,7 @@ def _set_key(raw):
     if V.KEY.get("raw") != raw:
         V.KEY["aes"], V.KEY["raw"] = AESGCM(raw), raw
         _persist_leech_worker_key(raw)
-    _WAKE.set()
+    Leech._WAKE.set()
 
 def authed():
     raw = read_token(request.args.get("t", "") or request.headers.get("X-Vault-Token", ""))
@@ -94,7 +94,7 @@ def _load_leech_worker_key():
 
 def _store_downloaded_reel(path, filename, job_id, src_url):
     size = os.path.getsize(path)
-    if size <= 0 or size > _REEL_MAX_BYTES:
+    if size <= 0 or size > Leech.MAX_BYTES:
         raise RuntimeError("The downloaded video is empty or exceeds the 500 MB limit.")
     mime = mimetypes.guess_type(filename)[0] or "video/mp4"
     fid = secrets.token_hex(6)
