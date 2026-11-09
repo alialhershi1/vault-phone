@@ -9,6 +9,8 @@ from flask import Response, abort
 API = "https://discord.com/api/v10"
 # Keep vault_config.json private and out of Git. Environment variables override it.
 _config_path = Path(__file__).with_name("vault_config.json")
+if not _config_path.exists():
+    _config_path = Path(__file__).with_name("pc_leech_config.json")
 try:
     _config = json.loads(_config_path.read_text(encoding="utf-8")) if _config_path.exists() else {}
 except (OSError, json.JSONDecodeError):
