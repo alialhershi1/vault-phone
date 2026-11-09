@@ -157,6 +157,32 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
  #brainTip.collapsed #brainTipToggle{font-size:0;min-width:24px}
  #brainTip.collapsed #brainTipToggle::before{content:"+";font-size:14px}
 }
+
+/* Compact Gemini assistant, matching the Al Jazeera side widget */
+#geminiTip{position:fixed;z-index:21;top:565px;right:calc((100vw - 1050px)/2 - 194px);width:180px;padding:11px;border:1px solid #46506b;border-radius:13px;background:linear-gradient(150deg,#252b3c,#171e28 78%);box-shadow:0 10px 28px #0005;color:#e8f0f7}
+#geminiTip .gemini-kicker{display:flex;align-items:center;gap:7px;color:#b8a7ff;font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px}
+#geminiTip .gemini-mark{display:grid;place-items:center;width:19px;height:19px;border-radius:6px;background:#3b315f;font-size:11px}
+#geminiTipToggle{display:none;margin:0 0 0 auto;padding:2px 7px;min-height:24px;border:1px solid #ffffff20;border-radius:7px;background:#ffffff10;color:#dce8f2;font-size:12px}
+#geminiTipForm{display:grid;gap:6px}
+#geminiQuestion{width:100%;min-width:0;min-height:58px;max-height:110px;resize:vertical;margin:0;padding:8px;font-size:11px;line-height:1.4;background:#111820;border:1px solid #465366;border-radius:8px;color:#fff}
+#geminiAsk{width:100%;margin:0;padding:7px 8px;font-size:11px;background:#6551bd}
+#geminiAsk:disabled{opacity:.5}
+#geminiAnswer{max-height:180px;overflow:auto;margin-top:8px;padding:8px;border-radius:8px;background:#111820;color:#e4e8f1;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+#geminiSources{margin-top:6px;color:#9eabb9;font-size:9px;line-height:1.4;overflow-wrap:anywhere}
+#geminiTipFoot{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:8px;padding-top:7px;border-top:1px solid #ffffff12;color:#8f9cac;font-size:9px}
+#geminiTip.collapsed #geminiTipForm,#geminiTip.collapsed #geminiAnswer,#geminiTip.collapsed #geminiSources{display:none}
+#geminiTip.collapsed{padding:9px 10px}
+@media(min-width:601px) and (max-width:1439px){#geminiTip{display:none}}
+@media(max-width:600px){
+ #geminiTip{display:block;top:auto;right:50%;transform:translateX(50%);bottom:calc(12px + env(safe-area-inset-bottom));width:min(300px,calc(100vw - 20px));padding:9px 10px;border-radius:12px;background:rgba(37,43,60,.97);backdrop-filter:blur(12px)}
+ #geminiTip .gemini-kicker{margin:0;font-size:9px}
+ #geminiTip .gemini-mark{width:17px;height:17px}
+ #geminiTipToggle{display:inline-flex;align-items:center;justify-content:center}
+ #geminiTip.collapsed{width:auto;min-width:124px;border-radius:999px}
+ #geminiTip.expanded{max-height:44dvh;overflow:hidden;bottom:calc(12px + env(safe-area-inset-bottom))}
+ #geminiTip.expanded #geminiAnswer{max-height:22dvh}
+}
+
 </style></head><body>
 <h1>Vault</h1><p>Your encrypted library, streamed from Discord.</p>
 <section id="login" class="panel"><label for="password">Vault password</label><input id="password" type="password" autocomplete="current-password" placeholder="Enter the vault password"><button id="unlock">Unlock</button><div id="loginStatus" class="muted"></div></section>
@@ -175,6 +201,17 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
  <div class="news-kicker"><span class="news-mark">AJ</span> Al Jazeera <button id="newsTipToggle" type="button" aria-expanded="false" aria-label="Expand news">+</button></div>
  <div id="newsTipList"><div class="muted" style="font-size:11px">Loading latest headlines…</div></div>
  <div id="newsTipFoot"><a href="https://www.aljazeera.com/" target="_blank" rel="noopener noreferrer" style="color:#f2b36b;text-decoration:none">Al Jazeera English</a><span id="newsUpdated">Live feed</span><button id="newsTipRefresh" type="button" aria-label="Refresh headlines">↻</button></div>
+</aside>
+
+<aside id="geminiTip" class="collapsed" aria-label="Gemini vault assistant">
+ <div class="gemini-kicker"><span class="gemini-mark">✦</span> Gemini AI <button id="geminiTipToggle" type="button" aria-expanded="false" aria-label="Expand Gemini assistant">+</button></div>
+ <form id="geminiTipForm">
+  <textarea id="geminiQuestion" rows="2" maxlength="1200" placeholder="Ask about your vault…"></textarea>
+  <button id="geminiAsk" type="submit">Ask Gemini</button>
+ </form>
+ <div id="geminiAnswer" aria-live="polite">Ask a question about files stored in your Discord vault.</div>
+ <div id="geminiSources"></div>
+ <div id="geminiTipFoot"><span>Private vault context</span><span id="geminiModelLabel">Gemini Flash</span></div>
 </aside>
 
 <div class="panel" id="libraryTools">
@@ -853,4 +890,52 @@ if(token){$("login").classList.add("hidden");$("app").classList.remove("hidden")
  loadNews();
  setInterval(()=>{if(!document.hidden)loadNews()},180000);
 })();
+
+
+/* Gemini vault assistant: authenticated requests only; conversation stays in memory. */
+(()=>{
+ const card=document.getElementById("geminiTip"),toggle=document.getElementById("geminiTipToggle");
+ const form=document.getElementById("geminiTipForm"),input=document.getElementById("geminiQuestion");
+ const ask=document.getElementById("geminiAsk"),answer=document.getElementById("geminiAnswer");
+ const sources=document.getElementById("geminiSources"),news=document.getElementById("newsTip");
+ const newsToggle=document.getElementById("newsTipToggle"),brain=document.getElementById("brainTip");
+ const brainToggle=document.getElementById("brainTipToggle");
+ if(!card||!form||!input||!ask||!answer)return;
+ let busy=false,history=[];
+ function setCollapsed(collapsed){
+  card.classList.toggle("collapsed",collapsed);
+  card.classList.toggle("expanded",!collapsed);
+  if(toggle){toggle.textContent=collapsed?"+":"−";toggle.setAttribute("aria-expanded",String(!collapsed));}
+ }
+ if(toggle)toggle.addEventListener("click",()=>{
+  const open=card.classList.contains("collapsed");
+  setCollapsed(!open);
+  if(open){
+   if(news){news.classList.add("collapsed");news.classList.remove("expanded");}
+   if(newsToggle){newsToggle.textContent="+";newsToggle.setAttribute("aria-expanded","false");}
+   if(brain){brain.classList.add("collapsed");}
+   if(brainToggle){brainToggle.textContent="+";brainToggle.setAttribute("aria-expanded","false");}
+  }
+ });
+ form.addEventListener("submit",async e=>{
+  e.preventDefault();
+  const question=input.value.trim();
+  if(!question||busy)return;
+  if(!token){answer.textContent="Unlock your vault first.";return;}
+  busy=true;ask.disabled=true;ask.textContent="Reading vault…";
+  answer.textContent="Searching your vault files and asking Gemini…";sources.textContent="";
+  try{
+   const r=await fetch(auth("/api/gemini"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,history})});
+   let data={};try{data=await r.json()}catch(_){}
+   if(!r.ok)throw new Error(data.error||"Gemini is temporarily unavailable.");
+   answer.textContent=data.answer||"Gemini returned no answer.";
+   if(Array.isArray(data.sources)&&data.sources.length)sources.textContent="Read: "+data.sources.join(" · ");
+   history.push({role:"user",text:question},{role:"model",text:data.answer||""});
+   history=history.slice(-8);
+   input.value="";
+  }catch(err){answer.textContent=err.message||"Could not reach Gemini. Please try again."; }
+  finally{busy=false;ask.disabled=false;ask.textContent="Ask Gemini";}
+ });
+})();
+
 </script></body></html>
