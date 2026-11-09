@@ -327,7 +327,7 @@ function setReelSpeed(enabled){
 const reelDurationCache=new Map();
 const REEL_BATCH_SIZE=10;
 let reelDurationScanRunning=false,reelCandidateList=[],reelCandidateCursor=0,reelCandidateKey="",reelShuffle=false,reelLoadTarget=10;
-function isReel(f){return !!(f&&f.ok&&isVideo(f)&&f.kind==="instagram_reel"&&/^https?:\\/\\/(?:www\\.)?instagram\\.com\\/reel\\//i.test(f.src||""))}
+function isReel(f){return !!(f&&f.ok&&isVideo(f)&&f.kind==="instagram_reel"&&/^https?:\/\/(?:www\.)?instagram\.com\/reel\//i.test(f.src||""))}
 function shuffleList(list){
  const out=[...list];
  for(let i=out.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[out[i],out[j]]=[out[j],out[i]]}
