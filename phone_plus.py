@@ -1,8 +1,59 @@
 """"Render entry point for the upgraded Vault phone app."""
 import json, os, requests, threading, time
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from flask import abort, jsonify, request
 import phone_server as P
 V, app = P.V, P.app
+
+
+_NEWS_CACHE = {"at": 0.0, "items": []}
+_NEWS_LOCK = threading.Lock()
+
+@app.get("/api/news")
+def aljazeera_news():
+    now = time.time()
+    with _NEWS_LOCK:
+        if _NEWS_CACHE["items"] and now - _NEWS_CACHE["at"] < 90:
+            return jsonify(source="Al Jazeera English", items=_NEWS_CACHE["items"], fetched_at=int(_NEWS_CACHE["at"]))
+    try:
+        response = requests.get(
+            "https://www.aljazeera.com/xml/rss/all.xml",
+            headers={"User-Agent": "VaultNewsWidget/1.0 (+https://vault-phone.onrender.com)"},
+            timeout=12
+        )
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        channel = root.find("channel")
+        items = []
+        if channel is not None:
+            for item in channel.findall("item"):
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                pub_date = (item.findtext("pubDate") or "").strip()
+                if not title or not link:
+                    continue
+                if not link.startswith("https://www.aljazeera.com/"):
+                    continue
+                try:
+                    published = parsedate_to_datetime(pub_date).timestamp() if pub_date else 0
+                except Exception:
+                    published = 0
+                items.append({"title": title[:240], "url": link, "published": pub_date, "timestamp": int(published)})
+                if len(items) >= 8:
+                    break
+        if not items:
+            raise RuntimeError("Al Jazeera feed returned no headlines")
+        with _NEWS_LOCK:
+            _NEWS_CACHE.update(at=now, items=items)
+        return jsonify(source="Al Jazeera English", items=items, fetched_at=int(now))
+    except Exception as exc:
+        with _NEWS_LOCK:
+            stale = list(_NEWS_CACHE["items"])
+            fetched = int(_NEWS_CACHE["at"])
+        if stale:
+            return jsonify(source="Al Jazeera English", items=stale, fetched_at=fetched, stale=True)
+        return jsonify(error="News feed temporarily unavailable", detail=str(exc)[:120], items=[]), 502
 
 @app.post("/api/upload/resume")
 def upload_resume():
