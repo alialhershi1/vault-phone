@@ -3,3 +3,7 @@ requests>=2.31
 cryptography>=42
 yt-dlp>=2025.1.15
 psycopg[binary]>=3.2
+mcp>=1.26,<2
+starlette>=0.46
+uvicorn[standard]>=0.34
+pypdf>=5.0
