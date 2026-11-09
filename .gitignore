@@ -1,1 +1,5 @@
 vault_config.json
+pc_leech_config.json
+.venv/
+__pycache__/
+*.pyc
