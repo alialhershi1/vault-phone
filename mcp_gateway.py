@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.middleware.wsgi import WSGIMiddleware
+from starlette.responses import PlainTextResponse
 from starlette.routing import Mount
 
 import phone_server as P
@@ -19,7 +20,6 @@ import vault_server as V
 MCP_SECRET = os.environ.get("MCP_SECRET", "").strip()
 VAULT_PASSWORD = os.environ.get("VAULT_PASSWORD", "")
 _unlock_lock = threading.Lock()
-_unlocked_once = False
 
 mcp = FastMCP("Vault Library", instructions=(
     "Read-only access to the user's encrypted personal document vault. "
@@ -34,7 +34,6 @@ mcp = FastMCP("Vault Library", instructions=(
 
 def _ensure_unlocked():
     """Unlock from Render environment or the existing durable worker key."""
-    global _unlocked_once
     if V.KEY.get("aes") is not None:
         return
     with _unlock_lock:
@@ -63,7 +62,6 @@ def _ensure_unlocked():
             P._save_library_cache()
         P.start_scan()
         P.start_meta_fill()
-        _unlocked_once = True
 
 
 def _file(fid):
@@ -239,45 +237,41 @@ def read_vault_file(file_id: str, max_chars: int = 12000) -> str:
     return bytes(data[:max_chars * 4]).decode("utf-8", errors="replace")[:max_chars]
 
 
-class SecretPathGuard:
-    """Validate the secret after Starlette's Mount has resolved the route."""
-    def __init__(self, app):
+class MCPPathRouter:
+    """Intercept /mcp/<secret> before Starlette routing and normalize it for FastMCP."""
+    def __init__(self, app, mcp_app):
         self.app = app
+        self.mcp_app = mcp_app
 
     async def __call__(self, scope, receive, send):
-        path_params = scope.get("path_params") or {}
-        secret = path_params.get("secret")
-        if not secret:
-            root_path = str(scope.get("root_path", "")).rstrip("/")
-            secret = root_path.rsplit("/", 1)[-1] if root_path else ""
-        if not MCP_SECRET or not hmac.compare_digest(str(secret or ""), MCP_SECRET):
-            from starlette.responses import PlainTextResponse
-            response = PlainTextResponse("Not found", status_code=404)
-            await response(scope, receive, send)
-            return
-        # A request to the exact mounted URL has an empty remainder. FastMCP
-        # registers its Streamable HTTP handler at "/", so normalize it here.
-        child_scope = dict(scope)
-        if child_scope.get("path", "") == "":
+        if scope["type"] == "http" and str(scope.get("path", "")).startswith("/mcp/"):
+            parts = str(scope.get("path", "")).split("/")
+            supplied = parts[2] if len(parts) == 3 else ""
+            if not MCP_SECRET or not hmac.compare_digest(supplied, MCP_SECRET):
+                response = PlainTextResponse("Not found", status_code=404)
+                await response(scope, receive, send)
+                return
+            child_scope = dict(scope)
             child_scope["path"] = "/"
-        await self.app(child_scope, receive, send)
+            child_scope["raw_path"] = b"/"
+            child_scope["root_path"] = ""
+            await self.mcp_app(child_scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 def create_asgi_app(flask_app):
     if not MCP_SECRET:
         print("MCP disabled: set MCP_SECRET to enable the private connector endpoint.", flush=True)
     mcp_asgi = mcp.streamable_http_app()
-    guarded = SecretPathGuard(mcp_asgi)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
         async with mcp.session_manager.run():
             yield
 
-    return Starlette(
-        routes=[
-            Mount("/mcp/{secret:str}", app=guarded),
-            Mount("/", app=WSGIMiddleware(flask_app)),
-        ],
+    flask_asgi = Starlette(
+        routes=[Mount("/", app=WSGIMiddleware(flask_app))],
         lifespan=lifespan,
     )
+    return MCPPathRouter(flask_asgi, mcp_asgi)
