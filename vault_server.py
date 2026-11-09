@@ -1,15 +1,22 @@
 """Discord-backed encrypted vault helpers for the phone app.
 Credentials are supplied only through Render environment variables.
 """
-import os, re, time, threading, requests
+import os, re, time, threading, requests, json
+from pathlib import Path
 from collections import OrderedDict
 from flask import Response, abort
 
 API = "https://discord.com/api/v10"
-TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
-CH = os.environ.get("DISCORD_CHANNEL", "").strip()
+# Keep vault_config.json private and out of Git. Environment variables override it.
+_config_path = Path(__file__).with_name("vault_config.json")
+try:
+    _config = json.loads(_config_path.read_text(encoding="utf-8")) if _config_path.exists() else {}
+except (OSError, json.JSONDecodeError):
+    _config = {}
+TOKEN = os.environ.get("DISCORD_TOKEN", str(_config.get("DISCORD_TOKEN", ""))).strip()
+CH = os.environ.get("DISCORD_CHANNEL", str(_config.get("DISCORD_CHANNEL", "1530905756969336872"))).strip()
 if not TOKEN or not CH:
-    raise RuntimeError("Set DISCORD_TOKEN and DISCORD_CHANNEL in the service environment.")
+    raise RuntimeError("Set DISCORD_TOKEN in SillyDev Startup or private vault_config.json.")
 S = requests.Session()
 S.headers.update({"Authorization": "Bot " + TOKEN, "User-Agent": "VaultPhone/1.0"})
 CHUNK = 9 * 1024 * 1024
