@@ -118,7 +118,21 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 #brainTipText{font-size:12px;line-height:1.55;color:#e1e9f0;min-height:105px}
 #brainTipFoot{display:flex;justify-content:space-between;align-items:center;margin-top:9px;padding-top:8px;border-top:1px solid #ffffff12;color:#8fa0af;font-size:9px}
 #brainTipCount{font-variant-numeric:tabular-nums}
-@media(max-width:1439px){#brainTip{display:none}}
+@media(min-width:601px) and (max-width:1439px){#brainTip{display:none}}
+#brainTipToggle{display:none}
+@media(max-width:600px){
+ #brainTip{display:block;top:auto;right:10px;bottom:calc(12px + env(safe-area-inset-bottom));left:auto;width:min(270px,calc(100vw - 20px));padding:10px 11px 9px;border-radius:12px;box-shadow:0 6px 22px #0008;background:rgba(27,41,53,.96);backdrop-filter:blur(12px)}
+ #brainTip .brain-kicker{margin-bottom:5px;font-size:9px}
+ #brainTip .brain-mark{width:17px;height:17px}
+ #brainTipText{font-size:11px;line-height:1.4;min-height:0;max-height:3.0em;overflow:hidden}
+ #brainTipFoot{margin-top:6px;padding-top:6px;font-size:8px}
+ #brainTipToggle{display:inline-flex;align-items:center;justify-content:center;margin:0 0 0 auto;padding:2px 7px;min-height:24px;border:1px solid #ffffff20;border-radius:7px;background:#ffffff10;color:#dce8f2;font-size:12px;line-height:1}
+ #brainTip.collapsed{width:auto;min-width:116px;padding:8px 10px;border-radius:999px}
+ #brainTip.collapsed .brain-kicker{margin:0;gap:7px}
+ #brainTip.collapsed #brainTipText,#brainTip.collapsed #brainTipFoot{display:none}
+ #brainTip.collapsed #brainTipToggle{font-size:0;min-width:24px}
+ #brainTip.collapsed #brainTipToggle::before{content:"+";font-size:14px}
+}
 </style></head><body>
 <h1>Vault</h1><p>Your encrypted library, streamed from Discord.</p>
 <section id="login" class="panel"><label for="password">Vault password</label><input id="password" type="password" autocomplete="current-password" placeholder="Enter the vault password"><button id="unlock">Unlock</button><div id="loginStatus" class="muted"></div></section>
@@ -129,7 +143,7 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <button id="leechTab" type="button" role="tab" aria-selected="false">Vault Leech</button>
 </div>
 <aside id="brainTip" aria-label="Neuroscience tip" aria-live="polite">
- <div class="brain-kicker"><span class="brain-mark">✳</span> Brain notes</div>
+ <div class="brain-kicker"><span class="brain-mark">✳</span> Brain notes <button id="brainTipToggle" type="button" aria-label="Minimize brain notes" aria-expanded="true">−</button></div>
  <div id="brainTipText">A small step repeated consistently can become a powerful learning habit.</div>
  <div id="brainTipFoot"><span>One thought at a time</span><span id="brainTipCount">1 / 600</span></div>
 </aside>
@@ -728,6 +742,8 @@ if(token){$("login").classList.add("hidden");$("app").classList.remove("hidden")
  const tips=facts.flatMap((fact)=>nudges.map(nudge=>fact+" "+nudge));
  let order=Array.from({length:tips.length},(_,i)=>i),pos=0;
  for(let i=order.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[order[i],order[j]]=[order[j],order[i]];}
+ const card=document.getElementById("brainTip"),toggle=document.getElementById("brainTipToggle");
+ if(card&&toggle){toggle.addEventListener("click",()=>{const collapsed=card.classList.toggle("collapsed");toggle.setAttribute("aria-expanded",String(!collapsed));toggle.setAttribute("aria-label",collapsed?"Expand brain notes":"Minimize brain notes");toggle.textContent=collapsed?"+":"−";});}
  const textNode=document.getElementById("brainTipText"),countNode=document.getElementById("brainTipCount");
  if(!textNode||!countNode||tips.length!==600)return;
  function showTip(){const n=order[pos];textNode.textContent=tips[n];countNode.textContent=(pos+1)+" / "+tips.length;pos++;if(pos>=order.length){pos=0;for(let i=order.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[order[i],order[j]]=[order[j],order[i]];}}}
