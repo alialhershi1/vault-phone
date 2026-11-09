@@ -779,4 +779,47 @@ if(token){$("login").classList.add("hidden");$("app").classList.remove("hidden")
  showQuote();schedule();
  document.addEventListener("visibilitychange",()=>{if(!document.hidden){showQuote();schedule()}else if(timer){clearTimeout(timer);timer=null}});
 })();
+
+/* Al Jazeera English: show the eight newest RSS headlines, refreshed in the background. */
+(()=>{
+ const list=document.getElementById("newsTipList"),stamp=document.getElementById("newsUpdated");
+ const refresh=document.getElementById("newsTipRefresh"),card=document.getElementById("newsTip");
+ const toggle=document.getElementById("newsTipToggle"),brain=document.getElementById("brainTip"),brainToggle=document.getElementById("brainTipToggle");
+ if(!list||!card)return;
+ let busy=false;
+ function relativeTime(value){
+  if(!value)return "";
+  const d=new Date(value);if(Number.isNaN(d.getTime()))return "";
+  return new Intl.DateTimeFormat(undefined,{hour:"numeric",minute:"2-digit"}).format(d);
+ }
+ async function loadNews(){
+  if(busy)return;busy=true;
+  if(!list.children.length)list.textContent="Loading latest headlines…";
+  try{
+   const r=await fetch("/api/news",{cache:"no-store"});
+   const data=await r.json();
+   if(!r.ok||!Array.isArray(data.items)||!data.items.length)throw new Error("Feed unavailable");
+   const frag=document.createDocumentFragment();
+   data.items.slice(0,8).forEach(item=>{
+    const a=document.createElement("a");a.href=item.url;a.target="_blank";a.rel="noopener noreferrer";a.textContent=item.title;
+    const t=document.createElement("span");t.className="news-time";t.textContent=relativeTime(item.published);
+    a.appendChild(t);frag.appendChild(a);
+   });
+   list.replaceChildren(frag);
+   if(stamp)stamp.textContent=data.stale?"Saved feed":("Updated "+relativeTime(new Date((data.fetched_at||Date.now()/1000)*1000).toISOString()));
+  }catch(e){if(!list.children.length||list.textContent.includes("Loading"))list.textContent="Headlines are temporarily unavailable.";}
+  finally{busy=false;}
+ }
+ if(toggle)toggle.addEventListener("click",()=>{
+  const expanded=card.classList.toggle("expanded");
+  card.classList.toggle("collapsed",!expanded);
+  toggle.textContent=expanded?"−":"+";
+  toggle.setAttribute("aria-expanded",String(expanded));
+  toggle.setAttribute("aria-label",expanded?"Collapse news":"Expand news");
+  if(expanded&&brain){brain.classList.add("collapsed");if(brainToggle){brainToggle.textContent="+";brainToggle.setAttribute("aria-expanded","false");}}
+ });
+ if(refresh)refresh.addEventListener("click",loadNews);
+ loadNews();
+ setInterval(()=>{if(!document.hidden)loadNews()},180000);
+})();
 </script></body></html>
