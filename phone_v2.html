@@ -720,7 +720,7 @@ $("player").addEventListener("mousemove",showControls);
 vid.addEventListener("play",()=>{initAudioBoost();showControls();syncControls()});
 vid.addEventListener("pause",()=>{if(hideControlsTimer)clearTimeout(hideControlsTimer);$("player").classList.remove("controls-hidden");syncControls()});
 vid.addEventListener("timeupdate",syncControls);vid.addEventListener("durationchange",syncControls);
-vid.addEventListener("timeupdate",()=>saveVideoProgress(false));vid.addEventListener("pause",()=>saveVideoProgress(true));vid.addEventListener("ended",()=>{if(activeVideoId)clearVideoProgress(activeVideoId)});window.addEventListener("pagehide",()=>saveVideoProgress(true));
+vid.addEventListener("timeupdate",()=>saveVideoProgress(false));vid.addEventListener("ended",()=>{if(activeVideoId)clearVideoProgress(activeVideoId)});window.addEventListener("pagehide",()=>saveVideoProgress(true));
 vid.addEventListener("play",syncControls);vid.addEventListener("pause",syncControls);
 vid.addEventListener("timeupdate",syncControls);vid.addEventListener("durationchange",syncControls);
 $("seek").oninput=()=>{if(vid.duration)vid.currentTime=Number($("seek").value)/1000*vid.duration};
@@ -743,6 +743,7 @@ document.addEventListener("click",e=>{if(!$("captionMenu").contains(e.target)&&e
 $("video").addEventListener("ended",()=>moveQueue(1));
 $("speed").onchange=()=>{vid.playbackRate=Number($("speed").value)};
 $("lock").onclick=async()=>{
+ saveVideoProgress(true);
  try{await api(auth("/api/lock"),{method:"POST"})}catch(e){}
  token="";saveTok("");if(pollTimer)clearInterval(pollTimer);pollTimer=null;if(reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null};
  $("video").pause();$("video").removeAttribute("src");$("video").querySelectorAll("track").forEach(t=>t.remove());if(subtitleObjectUrl){URL.revokeObjectURL(subtitleObjectUrl);subtitleObjectUrl=""}$("video").load();$("captionMenu").innerHTML="";
