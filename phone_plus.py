@@ -115,4 +115,8 @@ _CACHE_THREAD = threading.Thread(target=_background_library_cache, name="vault-l
 _CACHE_THREAD.start()
 
 if __name__=="__main__":
-    app.run(host="0.0.0.0",port=int(os.environ.get("PORT","10000")),threaded=True)
+    # Serve the existing Flask app and private MCP endpoint together over ASGI.
+    import uvicorn
+    from mcp_gateway import create_asgi_app
+    asgi_app = create_asgi_app(app)
+    uvicorn.run(asgi_app, host="0.0.0.0", port=int(os.environ.get("PORT","10000")), proxy_headers=True, forwarded_allow_ips="*")
