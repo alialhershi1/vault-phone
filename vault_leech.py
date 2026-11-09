@@ -13,7 +13,7 @@ MAX_BYTES = 500 * 1024 * 1024
 MAX_ATTEMPTS = 5
 BATCH_MAX = 1000
 _THROTTLE = ("empty media response", "rate-limit", "rate limit", "429",
-             "too many requests", "not granting access")
+             "too many requests", "not granting access", "failed to parse json", "jsondecodeerror")
 _PERMANENT = ("private", "login required", "unavailable", "removed",
               "does not exist", "not found", "404", "age-restricted",
               "exceeds the 500")
@@ -65,6 +65,8 @@ def _friendly(raw):
     low = raw.lower()
     if "exceeded the rate-limit" in low or "redirected to the login page" in low:
         return "Instagram requires an authenticated session or has rate-limited this server."
+    if "failed to parse json" in low or "jsondecodeerror" in low:
+        return "Instagram returned an invalid response. Vault Leech is pausing the queue and will retry later."
     if "empty media response" in low or any(x in low for x in _THROTTLE[1:]):
         return "Instagram temporarily rate-limited this request. It will retry after a cooldown."
     if "private" in low or "login required" in low:
