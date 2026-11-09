@@ -298,11 +298,37 @@ function syncControls(){
  $("seek").value=d?Math.round(t/d*1000):0;$("time").textContent=fmtTime(t)+" / "+fmtTime(d);
  $("playPause").textContent=v.paused?"▶":"❚❚";$("mute").textContent=(v.muted||v.volume===0)?"🔇":"🔊";
 }
+/* Keep simple per-video playback positions in this browser so playback resumes after leaving the page. */
+const VIDEO_PROGRESS_KEY="vault_video_progress_v1";
+let activeVideoId="",lastProgressSave=0,restoringVideo=false;
+function readVideoProgress(){try{return JSON.parse(localStorage.getItem(VIDEO_PROGRESS_KEY)||"{}")}catch(e){return {}}}
+function saveVideoProgress(force=false){
+ const v=$("video");
+ if(!activeVideoId||!Number.isFinite(v.currentTime)||v.currentTime<3||restoringVideo)return;
+ const now=Date.now();if(!force&&now-lastProgressSave<5000)return;
+ try{
+  const data=readVideoProgress();data[activeVideoId]={time:v.currentTime,duration:Number.isFinite(v.duration)?v.duration:0,saved:now};
+  const entries=Object.entries(data).sort((a,b)=>(b[1].saved||0)-(a[1].saved||0)).slice(0,100);
+  localStorage.setItem(VIDEO_PROGRESS_KEY,JSON.stringify(Object.fromEntries(entries)));lastProgressSave=now;
+ }catch(e){}
+}
+function clearVideoProgress(id){try{const data=readVideoProgress();delete data[id];localStorage.setItem(VIDEO_PROGRESS_KEY,JSON.stringify(data))}catch(e){}}
 function playAt(index){
  if(index<0||index>=playQueue.length)return;
- currentIndex=index;const f=playQueue[index];$("playing").textContent=f.name;$("queueLabel").textContent=(index+1)+" / "+playQueue.length;
+ saveVideoProgress(true);
+ currentIndex=index;const f=playQueue[index];activeVideoId=String(f.id);lastProgressSave=0;
+ $("playing").textContent=f.name;$("queueLabel").textContent=(index+1)+" / "+playQueue.length;
  const v=$("video");v.pause();v.querySelectorAll("track").forEach(t=>t.remove());
- v.src=auth("/api/stream/"+encodeURIComponent(f.id));v.load();populateSubtitles(f);v.play().catch(()=>{});
+ const saved=readVideoProgress()[activeVideoId];const resumeAt=saved&&Number(saved.time)>8&&(!saved.duration||!Number(f.duration)||saved.time<Math.min(saved.duration,Number(f.duration))-20)?Number(saved.time):0;
+ restoringVideo=!!resumeAt;
+ v.src=auth("/api/stream/"+encodeURIComponent(f.id));v.load();populateSubtitles(f);
+ v.addEventListener("loadedmetadata",function restorePosition(){
+  if(activeVideoId!==String(f.id))return;
+  if(resumeAt>0&&Number.isFinite(v.duration)&&resumeAt<v.duration-2){
+   try{v.currentTime=resumeAt;$("queueLabel").textContent=(index+1)+" / "+playQueue.length+" · Resumed at "+fmtTime(resumeAt)}catch(e){}
+  }
+  restoringVideo=false;v.play().catch(()=>{});
+ },{once:true});
  $("previous").disabled=index===0;$("next").disabled=index>=playQueue.length-1;syncControls();
 }
 function moveQueue(delta){const n=currentIndex+delta;if(n>=0&&n<playQueue.length)playAt(n)}
@@ -694,6 +720,7 @@ $("player").addEventListener("mousemove",showControls);
 vid.addEventListener("play",()=>{initAudioBoost();showControls();syncControls()});
 vid.addEventListener("pause",()=>{if(hideControlsTimer)clearTimeout(hideControlsTimer);$("player").classList.remove("controls-hidden");syncControls()});
 vid.addEventListener("timeupdate",syncControls);vid.addEventListener("durationchange",syncControls);
+vid.addEventListener("timeupdate",()=>saveVideoProgress(false));vid.addEventListener("pause",()=>saveVideoProgress(true));vid.addEventListener("ended",()=>{if(activeVideoId)clearVideoProgress(activeVideoId)});window.addEventListener("pagehide",()=>saveVideoProgress(true));
 vid.addEventListener("play",syncControls);vid.addEventListener("pause",syncControls);
 vid.addEventListener("timeupdate",syncControls);vid.addEventListener("durationchange",syncControls);
 $("seek").oninput=()=>{if(vid.duration)vid.currentTime=Number($("seek").value)/1000*vid.duration};
