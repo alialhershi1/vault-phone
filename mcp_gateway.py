@@ -6,7 +6,6 @@ import os
 import re
 import tempfile
 import threading
-from pathlib import PurePosixPath
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -73,7 +72,6 @@ def _file(fid):
     if not item:
         raise ValueError("File not found or its metadata is still indexing.")
     if not P._hydrate_cached_stream(fid):
-        # The library scan may still be catching up; do not silently scan Discord history here.
         raise RuntimeError("File stream is not ready yet. Retry after the library index finishes.")
     info = V.get_info(fid)
     return item, info
@@ -92,9 +90,7 @@ def _pdf_reader(fid):
         raise ValueError("This file is not a PDF.")
     tmp = tempfile.TemporaryFile()
     try:
-        size = int(info["size"])
-        chunk_count = int(info["n"])
-        for index in range(chunk_count):
+        for index in range(int(info["n"])):
             tmp.write(V.get_chunk(fid, index))
         tmp.seek(0)
         from pypdf import PdfReader
@@ -134,7 +130,7 @@ def get_file_info(file_id: str) -> str:
     result = {k: item.get(k) for k in ("id", "name", "folder", "type", "size", "t", "ok")}
     result.update({"size_bytes": int(info["size"]), "mime_type": info.get("type", "")})
     if str(item.get("name", "")).lower().endswith(".pdf") or "pdf" in str(item.get("type", "")).lower():
-        name, tmp, reader = _pdf_reader(file_id)
+        _, tmp, reader = _pdf_reader(file_id)
         try:
             result["page_count"] = len(reader.pages)
         finally:
@@ -193,14 +189,15 @@ def find_chapter(file_id: str, chapter: str, max_results: int = 12) -> str:
     try:
         matches = []
         needle = term.casefold()
+        cap = max(1, min(int(max_results), 30))
         for n, page in enumerate(reader.pages, 1):
             lines = [line.strip() for line in (page.extract_text() or "").splitlines() if line.strip()]
             for line in lines:
                 if needle in line.casefold() and len(line) <= 240:
                     matches.append({"page": n, "heading": line})
-                    if len(matches) >= max(1, min(int(max_results), 30)):
+                    if len(matches) >= cap:
                         break
-            if len(matches) >= max(1, min(int(max_results), 30)):
+            if len(matches) >= cap:
                 break
         return json.dumps({"file": item.get("name"), "chapter_query": term, "matches": matches},
                           ensure_ascii=False)
@@ -215,13 +212,13 @@ def read_vault_file(file_id: str, max_chars: int = 12000) -> str:
     max_chars = max(500, min(int(max_chars), 30000))
     name = str(item.get("name", ""))
     if name.lower().endswith(".pdf") or "pdf" in str(item.get("type", "")).lower():
-        item, tmp, reader = _pdf_reader(file_id)
+        _, tmp, reader = _pdf_reader(file_id)
         try:
             parts, used = [], 0
             for n in range(1, len(reader.pages) + 1):
-                text = _read_pdf_page_text(reader, n)
-                if text:
-                    part = f"\n--- Page {n} ---\n{text}"
+                page_text = _read_pdf_page_text(reader, n)
+                if page_text:
+                    part = f"\n--- Page {n} ---\n{page_text}"
                     parts.append(part)
                     used += len(part)
                     if used >= max_chars:
@@ -240,18 +237,27 @@ def read_vault_file(file_id: str, max_chars: int = 12000) -> str:
 
 
 class SecretPathGuard:
-    """Reject every request unless the URL path contains the configured secret."""
+    """Validate the secret after Starlette's Mount has resolved the route."""
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        secret = (scope.get("path_params") or {}).get("secret", "")
-        if not MCP_SECRET or not hmac.compare_digest(str(secret), MCP_SECRET):
+        path_params = scope.get("path_params") or {}
+        secret = path_params.get("secret")
+        if not secret:
+            root_path = str(scope.get("root_path", "")).rstrip("/")
+            secret = root_path.rsplit("/", 1)[-1] if root_path else ""
+        if not MCP_SECRET or not hmac.compare_digest(str(secret or ""), MCP_SECRET):
             from starlette.responses import PlainTextResponse
             response = PlainTextResponse("Not found", status_code=404)
             await response(scope, receive, send)
             return
-        await self.app(scope, receive, send)
+        # A request to the exact mounted URL has an empty remainder. FastMCP
+        # registers its Streamable HTTP handler at "/", so normalize it here.
+        child_scope = dict(scope)
+        if child_scope.get("path", "") == "":
+            child_scope["path"] = "/"
+        await self.app(child_scope, receive, send)
 
 
 def create_asgi_app(flask_app):
@@ -259,14 +265,17 @@ def create_asgi_app(flask_app):
         print("MCP disabled: set MCP_SECRET to enable the private connector endpoint.", flush=True)
     mcp_asgi = mcp.streamable_http_app(
         streamable_http_path="/",
-        host="0.0.0.0",
-        transport_security=TransportSecuritySettings(allowed_hosts=["vault-phone.onrender.com", "vault-phone.onrender.com:*"]),
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=["vault-phone.onrender.com", "vault-phone.onrender.com:*"]
+        ),
     )
     guarded = SecretPathGuard(mcp_asgi)
+
     @contextlib.asynccontextmanager
     async def lifespan(app):
         async with mcp.session_manager.run():
             yield
+
     return Starlette(
         routes=[
             Mount("/mcp/{secret:str}", app=guarded),
