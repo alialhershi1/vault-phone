@@ -648,6 +648,7 @@ def vault_gemini():
         return jsonify(error="Type a question first."), 400
 
     try:
+        start_scan()
         snapshot = library()
         items = [x for x in snapshot.get("items", []) if x.get("ok")]
         if not items:
