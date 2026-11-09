@@ -26,7 +26,10 @@ mcp = FastMCP("Vault Library", instructions=(
     "Use list_vault_files to locate a document, find_chapter to locate a section, "
     "read_pages to read selected PDF pages, and search_file to find relevant passages. "
     "Keep page ranges small."
-))
+), host="0.0.0.0", streamable_http_path="/",
+   transport_security=TransportSecuritySettings(
+       allowed_hosts=["vault-phone.onrender.com", "vault-phone.onrender.com:*"]
+   ))
 
 
 def _ensure_unlocked():
@@ -263,12 +266,7 @@ class SecretPathGuard:
 def create_asgi_app(flask_app):
     if not MCP_SECRET:
         print("MCP disabled: set MCP_SECRET to enable the private connector endpoint.", flush=True)
-    mcp_asgi = mcp.streamable_http_app(
-        streamable_http_path="/",
-        transport_security=TransportSecuritySettings(
-            allowed_hosts=["vault-phone.onrender.com", "vault-phone.onrender.com:*"]
-        ),
-    )
+    mcp_asgi = mcp.streamable_http_app()
     guarded = SecretPathGuard(mcp_asgi)
 
     @contextlib.asynccontextmanager
