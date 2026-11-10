@@ -101,7 +101,9 @@ def _store_downloaded_reel(path, filename, job_id, src_url):
     fid = secrets.token_hex(6)
     n = max(1, (size + V.CHUNK - 1) // V.CHUNK)
     t = int(time.time() * 1000)
-    meta = {"name": filename, "folder": "Reels", "kind": "instagram_reel", "type": mime, "size": size, "t": t, "src": src_url}
+    source_host = (urlparse(src_url).hostname or "").lower()
+    source_kind = "youtube_video" if source_host == "youtu.be" or source_host.endswith("youtube.com") else "instagram_reel"
+    meta = {"name": filename, "folder": "Reels", "kind": source_kind, "type": mime, "size": size, "t": t, "src": src_url}
     created_ids, last_url, ok = [], None, False
     try:
         # Chunks first, meta LAST: the library only lists an entry once it is complete.
