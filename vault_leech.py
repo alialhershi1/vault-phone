@@ -187,10 +187,11 @@ def _download_youtube(url, output_path, job_id):
     if not node:
         raise RuntimeError("Node.js is not available for the YouTube.js downloader.")
     helper = os.path.join(root, "youtube_worker.mjs")
+    log_output = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
     proc = subprocess.Popen(
         [node, helper, url, output_path],
-        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1
+        cwd=root, stdout=log_output, stderr=subprocess.STDOUT,
+        text=True
     )
     last_update = 0.0
     while proc.poll() is None:
@@ -205,7 +206,10 @@ def _download_youtube(url, output_path, job_id):
                 Q.update(job_id, percent=min(75, max(2, int(size / (5 * 1024 * 1024)))),
                          message="Vault Leech · YouTube.js · " + str(round(size / 1048576, 1)) + " MB received")
         time.sleep(0.5)
-    output = proc.communicate()[0] or ""
+    proc.wait()
+    log_output.seek(0)
+    output = log_output.read() or ""
+    log_output.close()
     if proc.returncode != 0:
         try:
             result = json.loads(output.strip().splitlines()[-1])
