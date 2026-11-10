@@ -62,17 +62,28 @@ def _platform(url):
 
 
 def _cookie_file(temp_dir, platform):
+    """Write a private Netscape cookie jar from a Netscape export or Cookie header.
+
+    Cookie values are credentials: never log, return, or include them in errors.
+    """
     names = ("YT_COOKIES", "YOUTUBE_COOKIES") if platform == "youtube" else ("IG_COOKIES",)
     raw = next((os.environ.get(name, "").strip() for name in names if os.environ.get(name, "").strip()), "")
     if not raw:
         return None
-    path = os.path.join(temp_dir, "cookies.txt")
-    if any(line.count("\t") >= 6 for line in raw.splitlines()):
+
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+    lines = raw.splitlines()
+    cookie_rows = [line for line in lines if line and not line.lstrip().startswith("#")]
+    is_netscape = bool(cookie_rows) and all(len(line.split("\t")) >= 7 for line in cookie_rows)
+
+    if is_netscape:
         text = raw.rstrip() + "\n"
+        count = len(cookie_rows)
     else:
+        header = re.sub(r"(?im)^\s*cookie\s*:\s*", "", raw).replace("\n", ";")
         domain = ".youtube.com" if platform == "youtube" else ".instagram.com"
         rows = []
-        for part in raw.replace("\r", "").replace("\n", ";").split(";"):
+        for part in header.split(";"):
             part = part.strip()
             if "=" not in part:
                 continue
@@ -82,13 +93,19 @@ def _cookie_file(temp_dir, platform):
                 continue
             rows.append("%s\tTRUE\t/\tTRUE\t0\t%s\t%s" % (domain, name, value))
         if not rows:
-            raise RuntimeError("The configured video cookies are not a valid Cookie header or Netscape export.")
+            raise RuntimeError("Configured video cookies are empty or invalid. Set YT_COOKIES to a Netscape cookies.txt export or Cookie header.")
         text = "# Netscape HTTP Cookie File\n" + "\n".join(rows) + "\n"
+        count = len(rows)
+
+    path = os.path.join(temp_dir, "cookies.txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    print("vault leech: loaded %s cookie records for %s" % (count, platform), flush=True)
     return path
-
-
 def _friendly(raw, platform="youtube"):
     low = raw.lower()
     if platform == "youtube":
@@ -169,7 +186,8 @@ def _process(job, store_file):
         if cookie_path:
             opts["cookiefile"] = cookie_path
             if platform == "youtube":
-                opts["extractor_args"] = {"youtube": {"player_client": ["default", "web_embedded"]}}
+                # yt-dlp applies YouTube account cookies through the web client.
+                opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
         with yt_dlp.YoutubeDL(opts) as dl:
             info = dl.extract_info(job["url"], download=True)
             if not info:
