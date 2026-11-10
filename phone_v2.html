@@ -226,14 +226,14 @@ small,.muted{color:#9eabb9}.hidden{display:none!important}
 <div id="reelFeed"><div class="reel-empty">Your Reels folder is empty.<br>No videos are stored in your server vault yet. You can optionally add videos from your phone above.</div></div>
 </div>
 <div id="leechPanel" class="panel hidden">
-<div class="reels-head"><div><h2>Vault Leech</h2><small class="muted">Instagram downloader · independent queue · saves into your encrypted Reels folder</small></div></div>
+<div class="reels-head"><div><h2>Vault Leech</h2><small class="muted">YouTube + Instagram downloader · independent queue · saves into your encrypted Reels folder</small></div></div>
 <div class="reel-link-tools">
-<textarea id="reelLinks" rows="8" spellcheck="false" placeholder="Paste Instagram Reel links or exported JSON / HTML / text." aria-label="Instagram Reel links"></textarea>
+<textarea id="reelLinks" rows="8" spellcheck="false" placeholder="Paste public YouTube or Instagram video links, or exported JSON / HTML / text." aria-label="Instagram Reel links"></textarea>
 <button id="downloadReels" type="button">Send to Vault Leech</button>
 <small class="muted">Server-side yt-dlp downloads · saved videos appear in Reels</small>
 </div>
 <div id="reelJobs" aria-live="polite"></div>
-<div id="reelStatus">Vault Leech is ready. Add Instagram Reel links to queue downloads.</div>
+<div id="reelStatus">Vault Leech is ready. Add a YouTube or Instagram video link to queue a download.</div>
 </div>
 <div id="library" class="panel"><div class="player-head"><h2>Library</h2><small id="total"></small></div><div class="library-search"><input id="search" type="search" placeholder="Search files and folders"><select id="sizeFilter" aria-label="Filter by file size"><option value="all">All sizes</option><option value="small">Under 500 MB</option><option value="medium">500 MB–2 GB</option><option value="large">2–5 GB</option><option value="huge">Over 5 GB</option></select></div><div class="folder-tools"><input id="newFolder" type="text" maxlength="60" placeholder="New folder name"><button id="createFolder" class="secondary" type="button">+ Folder</button></div><div id="items"></div></div>
 <div class="panel" id="playerPanel">
@@ -621,7 +621,7 @@ function renderReelJobs(){
  for(const job of reelJobs.slice(0,20)){
   const card=document.createElement("div");card.className="reel-job";
   const top=document.createElement("div");top.className="reel-job-top";
-  const title=document.createElement("strong");title.className="reel-job-title";title.textContent=job.title||"Instagram Reel";
+  const title=document.createElement("strong");title.className="reel-job-title";title.textContent=job.title||"Video";
   const status=document.createElement("span");status.className="reel-job-status";status.textContent=job.status==="completed"?"Saved":job.status==="failed"?"Failed":job.status==="queued"?"Queued":job.status==="storing"?"Saving to Discord": "Downloading";
   top.append(title,status);card.append(top);
   const detail=document.createElement("small");detail.className="muted";detail.textContent=job.message||job.url||"";card.append(detail);
@@ -637,7 +637,7 @@ async function refreshReelJobs(){
   const next=data.jobs||[],summary=data.summary||{};
   const newlyCompleted=next.some(job=>job.status==="completed"&&!reelJobs.some(old=>old.id===job.id&&old.status==="completed"));
   reelJobs=next;renderReelJobs();
-  if(summary.total!==undefined)$("reelStatus").textContent="Reel downloads · "+summary.total+" submitted · "+summary.completed+" saved · "+summary.failed+" failed · "+summary.queued+" queued · "+summary.downloading+" downloading"+(summary.storing?" · "+summary.storing+" storing":"")+" · "+summary.remaining+" remaining"+(summary.durable===false?" · ⚠ queue not persistent (no database)":"");
+  if(summary.total!==undefined)$("reelStatus").textContent="Video downloads · "+summary.total+" submitted · "+summary.completed+" saved · "+summary.failed+" failed · "+summary.queued+" queued · "+summary.downloading+" downloading"+(summary.storing?" · "+summary.storing+" storing":"")+" · "+summary.remaining+" remaining"+(summary.durable===false?" · ⚠ queue not persistent (no database)":"");
   const active=Number(summary.active||0)>0||next.some(job=>["queued","downloading","storing"].includes(job.status));
   if(active&&!reelJobPoll)reelJobPoll=setInterval(refreshReelJobs,2200);
   if(!active&&reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}
@@ -646,17 +646,17 @@ async function refreshReelJobs(){
   if(reelJobPoll){clearInterval(reelJobPoll);reelJobPoll=null}
  }finally{reelJobRefreshBusy=false}
 }
-function extractInstagramReelLinks(raw){
+function extractVideoLinks(raw){
  const text=String(raw||"").replace(/\\u0026/gi,"&").replace(/&amp;/gi,"&").replace(/\\\//g,"/");
- const re=/https?:\/\/(?:(?:www|m)\.)?instagram\.com\/(?:reel|reels)\/[A-Za-z0-9_-]+\/?/gi;
- return [...new Set([...text.matchAll(re)].map(m=>m[0].replace(/\/$/,"")+"/"))];
+ const re=/https?:\/\/(?:(?:www|m|music)\.)?youtube\.com\/[^\s"'<>]+|https?:\/\/youtu\.be\/[^\s"'<>]+|https?:\/\/(?:(?:www|m)\.)?instagram\.com\/(?:reel|reels)\/[A-Za-z0-9_-]+\/?/gi;
+ return [...new Set([...text.matchAll(re)].map(m=>m[0].replace(/[),.;]+$/,"")))];
 }
 $("downloadReels").onclick=async()=>{
  const raw=$("reelLinks").value;
- const all=[...String(raw||"").matchAll(/https?:\/\/(?:(?:www|m)\.)?instagram\.com\/(?:[^\/\s"'<>]+\/)?(?:reel|reels)\/[A-Za-z0-9_-]+/gi)].length;
- const urls=extractInstagramReelLinks(raw);
- if(!urls.length){$("reelStatus").textContent="I couldn't find Instagram Reel URLs in that text. Paste the full https://www.instagram.com/reel/… links or the exported JSON/HTML contents.";return}
- $("downloadReels").disabled=true;
+ const all=(String(raw||"").match(/https?:\/\/(?:(?:www|m|music)\.)?youtube\.com\/[^\s"'<>]+|https?:\/\/youtu\.be\/[^\s"'<>]+|https?:\/\/(?:(?:www|m)\.)?instagram\.com\/(?:reel|reels)\/[A-Za-z0-9_-]+/gi)||[]).length;
+ const urls=extractVideoLinks(raw);
+ if(!urls.length){$("reelStatus").textContent="I couldn't find supported YouTube or Instagram video URLs in that text. Paste a full public video link.";return}
+$("downloadReels").disabled=true;
  const t={added:0,requeued:0,duplicates:0,invalid:0},step=500;let sent=0,failedChunk="";
  try{
   for(let i=0;i<urls.length;i+=step){
@@ -672,7 +672,7 @@ $("downloadReels").onclick=async()=>{
  $("downloadReels").disabled=false;
  try{await refreshReelJobs()}catch(e){}
 };
-if(!$("retryFailedReels")){const b=document.createElement("button");b.id="retryFailedReels";b.className="secondary";b.textContent="Retry failed";b.onclick=async()=>{try{const d=await(await api(auth("/api/reels/retry_failed"),{method:"POST"})).json();$("reelStatus").textContent="Re-queued "+d.requeued+" failed Reel(s).";await refreshReelJobs()}catch(e){$("reelStatus").textContent=e.message}};$("downloadReels").insertAdjacentElement("afterend",b)}
+if(!$("retryFailedReels")){const b=document.createElement("button");b.id="retryFailedReels";b.className="secondary";b.textContent="Retry failed";b.onclick=async()=>{try{const d=await(await api(auth("/api/reels/retry_failed"),{method:"POST"})).json();$("reelStatus").textContent="Re-queued "+d.requeued+" failed video(s).";await refreshReelJobs()}catch(e){$("reelStatus").textContent=e.message}};$("downloadReels").insertAdjacentElement("afterend",b)}
 $("uploadReels").onclick=async()=>{
  if(!$("reelFiles").files.length){$("reelFiles").click();return}
  const fs=[...$("reelFiles").files].filter(f=>f.type.startsWith("video/")||/\.(mp4|m4v|webm|mov|ogv)$/i.test(f.name));
