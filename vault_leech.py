@@ -4,7 +4,7 @@ The engine owns extraction, queue processing and retries. The host
 application supplies authentication and the encrypted Discord-vault storage
 callback; downloader cookies are optional and never include vault credentials.
 """
-import os, re, time, random, tempfile, threading, shutil
+import os, re, time, random, tempfile, threading, shutil, subprocess, json
 from urllib.parse import urlparse, parse_qs
 from flask import abort, jsonify, request
 import leech_queue as Q
@@ -151,6 +151,77 @@ def _failure(job, exc):
         Q.update(job["id"], status="failed", message=_friendly(raw, platform))
 
 
+_YTJS_LOCK = threading.Lock()
+_YTJS_READY = False
+
+def _ensure_youtubejs():
+    """Install the pinned YouTube.js package once if the Render build did not."""
+    global _YTJS_READY
+    if _YTJS_READY:
+        return
+    with _YTJS_LOCK:
+        if _YTJS_READY:
+            return
+        root = os.path.dirname(os.path.abspath(__file__))
+        package_dir = os.path.join(root, "node_modules", "youtubei.js")
+        if not os.path.isdir(package_dir):
+            npm = shutil.which("npm")
+            node = shutil.which("node")
+            if not npm or not node:
+                raise RuntimeError("YouTube.js needs Node.js and npm on this service. Add Node.js to the Render runtime and redeploy.")
+            result = subprocess.run(
+                [npm, "install", "--no-save", "--no-audit", "--no-fund", "youtubei.js@18.3.0"],
+                cwd=root, capture_output=True, text=True, timeout=300
+            )
+            if result.returncode:
+                detail = (result.stderr or result.stdout or "npm install failed").strip()
+                raise RuntimeError("Could not install YouTube.js: " + detail[-500:])
+        _YTJS_READY = True
+
+
+def _download_youtube(url, output_path, job_id):
+    """Download through YouTube.js; Instagram remains on its existing engine."""
+    _ensure_youtubejs()
+    root = os.path.dirname(os.path.abspath(__file__))
+    node = shutil.which("node")
+    if not node:
+        raise RuntimeError("Node.js is not available for the YouTube.js downloader.")
+    helper = os.path.join(root, "youtube_worker.mjs")
+    proc = subprocess.Popen(
+        [node, helper, url, output_path],
+        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1
+    )
+    last_update = 0.0
+    while proc.poll() is None:
+        now = time.time()
+        if now - last_update >= 2:
+            last_update = now
+            try:
+                size = os.path.getsize(output_path)
+            except OSError:
+                size = 0
+            if size:
+                Q.update(job_id, percent=min(75, max(2, int(size / (5 * 1024 * 1024)))),
+                         message="Vault Leech · YouTube.js · " + str(round(size / 1048576, 1)) + " MB received")
+        time.sleep(0.5)
+    output = proc.communicate()[0] or ""
+    if proc.returncode != 0:
+        try:
+            result = json.loads(output.strip().splitlines()[-1])
+            message = result.get("error") or "YouTube.js download failed."
+        except Exception:
+            message = output.strip()[-500:] or "YouTube.js download failed."
+        raise RuntimeError(message)
+    try:
+        result = json.loads(output.strip().splitlines()[-1])
+    except Exception:
+        raise RuntimeError("YouTube.js finished without returning download details.")
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+        raise RuntimeError("YouTube.js returned an empty video file.")
+    return {"title": result.get("title") or "YouTube video", "id": result.get("id") or ""}
+
+
 def _process(job, store_file):
     import yt_dlp
     jid = job["id"]
@@ -172,27 +243,30 @@ def _process(job, store_file):
                 Q.update(jid, percent=pct, message="Vault Leech · Downloading · " +
                          (str(d.get("_percent_str", "")).strip() or "working"))
 
-        opts = {
-            "format": "best[ext=mp4]/best",
-            "outtmpl": os.path.join(folder, "%(id)s.%(ext)s"),
-            "noplaylist": True, "quiet": True, "no_warnings": True,
-            "restrictfilenames": True, "socket_timeout": 45,
-            "retries": 3, "fragment_retries": 3, "extractor_retries": 3,
-            "file_access_retries": 2, "max_filesize": MAX_BYTES,
-            "progress_hooks": [progress],
-            "js_runtimes": {"node": {}}
-        }
-        cookie_path = _cookie_file(folder, platform)
-        if cookie_path:
-            opts["cookiefile"] = cookie_path
-            if platform == "youtube":
-                # yt-dlp applies YouTube account cookies through the web client.
-                opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
-        with yt_dlp.YoutubeDL(opts) as dl:
-            info = dl.extract_info(job["url"], download=True)
-            if not info:
-                raise RuntimeError(platform.capitalize() + " did not provide a downloadable video.")
-            path = dl.prepare_filename(info)
+        if platform == "youtube":
+            # YouTube.js is a separate InnerTube implementation. It reads the
+            # existing YT_COOKIES / YOUTUBE_COOKIES secret without logging it.
+            path = os.path.join(folder, "youtube-video.mp4")
+            info = _download_youtube(job["url"], path, jid)
+        else:
+            opts = {
+                "format": "best[ext=mp4]/best",
+                "outtmpl": os.path.join(folder, "%(id)s.%(ext)s"),
+                "noplaylist": True, "quiet": True, "no_warnings": True,
+                "restrictfilenames": True, "socket_timeout": 45,
+                "retries": 3, "fragment_retries": 3, "extractor_retries": 3,
+                "file_access_retries": 2, "max_filesize": MAX_BYTES,
+                "progress_hooks": [progress],
+                "js_runtimes": {"node": {}}
+            }
+            cookie_path = _cookie_file(folder, platform)
+            if cookie_path:
+                opts["cookiefile"] = cookie_path
+            with yt_dlp.YoutubeDL(opts) as dl:
+                info = dl.extract_info(job["url"], download=True)
+                if not info:
+                    raise RuntimeError(platform.capitalize() + " did not provide a downloadable video.")
+                path = dl.prepare_filename(info)
         if not os.path.isfile(path):
             candidates = [os.path.join(folder, n) for n in os.listdir(folder)
                           if n != "cookies.txt" and os.path.isfile(os.path.join(folder, n))]
