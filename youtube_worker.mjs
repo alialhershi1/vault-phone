@@ -8,7 +8,7 @@ function cookieHeader() {
   const raw = (process.env.YT_COOKIES || process.env.YOUTUBE_COOKIES || '').trim();
   if (!raw) return '';
   const lines = raw.replace(/\r/g, '').split('\n');
-  const rows = lines.filter((line) => line && !line.trimStart().startsWith('#'));
+  const rows = lines.filter((line) => line && (!line.trimStart().startsWith('#') || line.trimStart().startsWith('#HttpOnly_')));
   const netscape = rows.length > 0 && rows.every((line) => line.split('\t').length >= 7);
   if (netscape) {
     const pairs = [];
