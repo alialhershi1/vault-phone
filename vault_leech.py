@@ -17,7 +17,7 @@ IG_HOSTS = {"instagram.com", "www.instagram.com", "m.instagram.com"}
 _THROTTLE = (
     "empty media response", "rate-limit", "rate limit", "429", "too many requests",
     "not granting access", "failed to parse json", "jsondecodeerror",
-    "failed to extract any player response", "http error 403", "server returned 403"
+    "failed to extract any player response"
 )
 _PERMANENT = (
     "private", "login required", "unavailable", "removed", "does not exist",
@@ -98,8 +98,8 @@ def _friendly(raw, platform="youtube"):
             return "YouTube's format check needs the JavaScript runtime. Check the latest service build and runtime logs."
         if "sign in to confirm" in low or "login required" in low:
             return "YouTube requires an authorized session for this video. Public videos should work without cookies."
-        if "http error 403" in low or "forbidden" in low:
-            return "YouTube refused the media request. It may be temporarily restricting this server or the selected format."
+        if "http error 403" in low or "server returned 403" in low:
+            return "YouTube returned HTTP 403 for the media file. The server/CDN denied access; this is not a URL-format problem, and automatic retries will not fix the denial. Use a download supplied or authorized by the video owner."
     else:
         if "exceeded the rate-limit" in low or "redirected to the login page" in low:
             return "Instagram requires an authenticated session or has rate-limited this server."
@@ -120,7 +120,8 @@ def _failure(job, exc):
         "exceeded the rate-limit" in low or "redirected to the login page" in low
     ) and not os.environ.get("IG_COOKIES", "").strip()
     throttled = any(x in low for x in _THROTTLE) and not auth_blocked
-    permanent = auth_blocked or (not throttled and any(x in low for x in _PERMANENT))
+    youtube_403 = platform == "youtube" and ("http error 403" in low or "server returned 403" in low)
+    permanent = auth_blocked or youtube_403 or (not throttled and any(x in low for x in _PERMANENT))
     attempts = int(job.get("attempts") or 1)
     if throttled:
         _COOL["until"] = time.time() + min(900, 90 * attempts)
