@@ -1,7 +1,8 @@
 Flask>=3.0,<4
 requests>=2.31
 cryptography>=42
-yt-dlp>=2025.1.15
+yt-dlp[default] @ git+https://github.com/yt-dlp/yt-dlp.git
+yt-dlp-ejs>=0.8.0
 psycopg[binary]>=3.2
 mcp>=1.26,<2
 starlette>=0.46
