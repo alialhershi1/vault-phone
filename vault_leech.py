@@ -8,7 +8,7 @@ Set two secrets before starting:
     LEECH_KEY      = a long random access key for this page (you choose it)
 Linux:    export VAULT_PASSWORD='...' LEECH_KEY='...' ; python3 vault_leech.py
 Then open  http://SERVER-IP:8790  and enter the access key once."""
-import json, mimetypes, os, queue, re, secrets, shutil, subprocess, sys, threading, time
+import json, mimetypes, os, queue, re, secrets, shutil, subprocess, sys, threading, time, tempfile, random
 from urllib.parse import parse_qs, unquote, urlparse
 
 from cryptography.hazmat.primitives import hashes
@@ -17,13 +17,14 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from flask import Flask, Response, abort, jsonify, request
 
 import vault_server as V   # token, channel and the 9 MB chunk size only
+import reel_queue as Q   # durable Instagram/Reels job queue
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DL = os.path.join(HERE, "leech_tmp")      # temporary download folder, emptied after each job
 PORT = int(os.environ.get("LEECH_PORT") or os.environ.get("PORT") or 8790)   # hosts like Render set PORT themselves
 app = Flask(__name__)
 AES = None
-JOBS, ORDER, Q = {}, [], queue.Queue()
+JOBS, ORDER, JOB_Q = {}, [], queue.Queue()
 LOCK = threading.Lock()
 
 # Social-video downloads use their own queue, worker, and temporary folders.
@@ -161,7 +162,7 @@ def run(job):
 
 def worker():
     while True:
-        job = Q.get()
+        job = JOB_Q.get()
         if job["cancel"]:
             job["status"] = "cancelled"
         else:
@@ -283,7 +284,7 @@ def add():
         for old in ORDER[40:]:
             JOBS.pop(old, None)
         del ORDER[40:]
-    Q.put(job)
+    JOB_Q.put(job)
     return jsonify(pub(job))
 
 
@@ -470,3 +471,165 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Phone Vault integration: durable Instagram Reel queue + API.
+# The standalone magnet/social Leecher above remains available unchanged.
+# ---------------------------------------------------------------------------
+MAX_BYTES = 500 * 1024 * 1024
+_WAKE = threading.Event()
+_REEL_RUNTIME = {"app": None, "store": None, "load_key": None, "started": False}
+_REEL_URL_RE = re.compile(r"^https?://(?:www\\.)?instagram\\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+/?(?:\\?.*)?$", re.I)
+
+
+def _valid_reel_url(raw):
+    value = str(raw or "").strip()
+    return value if len(value) <= 2048 and _REEL_URL_RE.match(value) else None
+
+
+def _reel_worker():
+    import yt_dlp
+    while True:
+        try:
+            if not V.KEY.get("aes"):
+                loader = _REEL_RUNTIME.get("load_key")
+                if loader:
+                    loader()
+            if not V.KEY.get("aes"):
+                _WAKE.wait(8)
+                _WAKE.clear()
+                continue
+            job = Q.claim()
+            if not job:
+                _WAKE.wait(8)
+                _WAKE.clear()
+                continue
+            jid = job["id"]
+            temp_dir = tempfile.mkdtemp(prefix="vault-reel-")
+            try:
+                last_update = [0.0]
+                def progress(data):
+                    now = time.time()
+                    if data.get("status") == "downloading" and now - last_update[0] > 2:
+                        last_update[0] = now
+                        total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+                        done = data.get("downloaded_bytes") or 0
+                        pct = min(79, int(done * 79 / total)) if total else 1
+                        Q.update(jid, percent=pct,
+                                 message="Downloading Reel · " + str(data.get("_percent_str", "working")).strip())
+                opts = {
+                    "format": "best[ext=mp4]/best",
+                    "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+                    "noplaylist": True, "quiet": True, "no_warnings": True,
+                    "restrictfilenames": True, "socket_timeout": 30,
+                    "retries": 2, "fragment_retries": 2, "extractor_retries": 1,
+                    "max_filesize": MAX_BYTES, "progress_hooks": [progress],
+                }
+                cookie_text = os.environ.get("IG_COOKIES", "").strip()
+                if cookie_text:
+                    cookie_path = os.path.join(temp_dir, "cookies.txt")
+                    with open(cookie_path, "w", encoding="utf-8") as fh:
+                        fh.write(cookie_text + "\n")
+                    opts["cookiefile"] = cookie_path
+                with yt_dlp.YoutubeDL(opts) as dl:
+                    info = dl.extract_info(job["url"], download=True)
+                    if not info:
+                        raise RuntimeError("Instagram did not provide a downloadable video.")
+                    path = dl.prepare_filename(info)
+                if not os.path.isfile(path):
+                    candidates = [os.path.join(temp_dir, n) for n in os.listdir(temp_dir)
+                                  if n != "cookies.txt" and os.path.isfile(os.path.join(temp_dir, n))]
+                    if not candidates:
+                        raise RuntimeError("Downloaded video file was not found.")
+                    path = candidates[0]
+                size = os.path.getsize(path)
+                if not 0 < size <= MAX_BYTES:
+                    raise RuntimeError("Video is empty or exceeds the 500 MB limit.")
+                ext = os.path.splitext(path)[1].lstrip(".") or "mp4"
+                stem = re.sub(r"[^A-Za-z0-9._ -]+", "_", str(info.get("title") or info.get("id") or "Instagram Reel"))
+                filename = (stem[:150].strip(" ._") or "Instagram Reel") + "." + ext
+                Q.update(jid, status="storing", percent=80, title=filename,
+                         message="Encrypting and sending to Discord…")
+                fid = _REEL_RUNTIME["store"](path, filename, jid, job["url"])
+                Q.update(jid, status="completed", percent=100, file_id=fid,
+                         title=filename, message="Saved in your Discord Vault · Reels")
+            except Exception as exc:
+                message = str(exc).strip() or "Download failed."
+                low = message.lower()
+                permanent = any(x in low for x in ("private", "login required", "unavailable", "not found", "404", "age-restricted"))
+                attempts = int(job.get("attempts") or 1)
+                if not permanent and attempts < 5:
+                    delay = min(1800, 30 * (2 ** max(0, attempts - 1))) + random.uniform(0, 8)
+                    Q.update(jid, status="queued", next_try=time.time() + delay, percent=0,
+                             message=("Retry scheduled: " + message[:130]))
+                else:
+                    Q.update(jid, status="failed", message=message[:220])
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            time.sleep(random.uniform(2, 4))
+        except Exception as exc:
+            print("Vault Reel worker error:", str(exc)[:300], flush=True)
+            time.sleep(8)
+
+
+def register(app, authed, store_callback, load_key_callback):
+    """Attach Reel endpoints and start two durable queue workers exactly once."""
+    _REEL_RUNTIME.update(app=app, store=store_callback, load_key=load_key_callback)
+
+    @app.post("/api/reels/download")
+    def reels_download():
+        if not authed():
+            abort(403)
+        raw_urls = (request.get_json(silent=True) or {}).get("urls") or []
+        if not isinstance(raw_urls, list):
+            return "Send a list of Instagram Reel URLs.", 400
+        if len(raw_urls) > 100:
+            return "Send at most 100 links per request.", 413
+        valid, seen, invalid, duplicates = [], set(), 0, 0
+        for raw in raw_urls:
+            url = _valid_reel_url(raw)
+            if not url:
+                invalid += 1
+            elif url in seen:
+                duplicates += 1
+            else:
+                seen.add(url)
+                valid.append(url)
+        added = requeued = db_duplicates = 0
+        if valid:
+            try:
+                added, db_duplicates, requeued = Q.add_many(valid)
+            except Exception as exc:
+                return ("Queue storage failed: " + str(exc)[:180]), 503
+            _WAKE.set()
+        return jsonify(submitted=len(raw_urls), added=added, requeued=requeued,
+                       duplicates=duplicates + db_duplicates, invalid=invalid,
+                       summary=Q.summary())
+
+    @app.get("/api/reels/jobs")
+    def reels_jobs():
+        if not authed():
+            abort(403)
+        try:
+            limit = min(200, max(1, int(request.args.get("limit", 50))))
+            offset = max(0, int(request.args.get("offset", 0)))
+            return jsonify(jobs=Q.listing(limit, offset, request.args.get("status")),
+                           summary=Q.summary())
+        except Exception as exc:
+            return ("Queue read failed: " + str(exc)[:180]), 503
+
+    @app.post("/api/reels/retry_failed")
+    def reels_retry_failed():
+        if not authed():
+            abort(403)
+        count = Q.retry_failed()
+        _WAKE.set()
+        return jsonify(requeued=count, summary=Q.summary())
+
+    if not _REEL_RUNTIME["started"]:
+        Q.init()
+        for _ in range(2):
+            threading.Thread(target=_reel_worker, daemon=True).start()
+        _REEL_RUNTIME["started"] = True
+    return True
