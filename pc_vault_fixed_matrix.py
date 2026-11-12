@@ -920,7 +920,9 @@ def vault_login():
             flask_session.permanent = True
             flask_session["vault_authenticated"] = True
             return redirect("/")
-        return render_template_string(_LOGIN_PAGE, csrf=secrets.token_urlsafe(32), error="Incorrect password."), 401
+        csrf = secrets.token_urlsafe(32)
+        flask_session["login_csrf"] = csrf
+        return render_template_string(_LOGIN_PAGE, csrf=csrf, error="Incorrect password."), 401
     csrf = secrets.token_urlsafe(32)
     flask_session["login_csrf"] = csrf
     return render_template_string(_LOGIN_PAGE, csrf=csrf, error="")
