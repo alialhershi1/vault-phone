@@ -7,7 +7,8 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, unquote, quote, urljoin, parse_qs
 import requests
-from flask import Flask, request, jsonify, Response, render_template_string, stream_with_context
+from flask import Flask, request, jsonify, Response, render_template_string, stream_with_context, redirect, url_for, session as flask_session
+import hmac
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
@@ -134,6 +135,17 @@ MAX_RAM_BYTES = int(os.environ.get("MAX_RAM_BYTES", "3221225472"))
 CHUNK = 9 * 1024 * 1024
 API = "https://discord.com/api/v10"
 app = Flask(__name__)
+# Server-side authentication for the entire Vault, including every Matrix/Vault API.
+# Keep the login password separate from VAULT_PASSWORD, which derives the existing
+# Discord-vault encryption key and must not be changed just to change the login.
+app.secret_key = os.environ.get("APP_SESSION_SECRET") or secrets.token_urlsafe(48)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+)
+LOGIN_PASSWORD = os.environ.get("VAULT_LOGIN_PASSWORD", "")
 jobs, lock = {}, threading.Lock()
 usage = {"requests": 0, "prompt_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 gemini_pref = {"model": None, "until": 0.0}
@@ -874,13 +886,62 @@ threading.Thread(target=_matrix_boot, daemon=True).start()
 
 @app.before_request
 def _vault_guard():
-    # Mutating API calls must come from this page: custom header + same-origin check (blocks drive-by requests from other sites).
+    # The only public endpoint is the password form. All Vault pages, Matrix SSO
+    # callbacks, and every API route require a valid authenticated session.
+    if request.endpoint == "vault_login":
+        return None
+    if not flask_session.get("vault_authenticated"):
+        if request.path.startswith("/api/"):
+            return jsonify(error="Authentication required.", login="/auth/login"), 401
+        return redirect(url_for("vault_login"))
+
+    # Keep the existing same-origin/custom-header protection on state-changing APIs.
     if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.path.startswith("/api/"):
         if request.headers.get("X-Vault-Req") != "1":
             return jsonify(error="Blocked: missing X-Vault-Req header."), 403
         origin = request.headers.get("Origin")
         if origin and urlparse(origin).netloc != request.host:
             return jsonify(error="Blocked: cross-origin request."), 403
+
+@app.route("/auth/login", methods=["GET", "POST"])
+def vault_login():
+    if not LOGIN_PASSWORD:
+        return "Vault login is not configured. Set VAULT_LOGIN_PASSWORD in the service environment.", 503
+    if flask_session.get("vault_authenticated"):
+        return redirect("/")
+    if request.method == "POST":
+        supplied_csrf = request.form.get("csrf", "")
+        expected_csrf = flask_session.get("login_csrf", "")
+        if not expected_csrf or not hmac.compare_digest(supplied_csrf, expected_csrf):
+            return "Invalid login request. Reload the page and try again.", 400
+        supplied = request.form.get("password", "")
+        if hmac.compare_digest(supplied, LOGIN_PASSWORD):
+            flask_session.clear()
+            flask_session.permanent = True
+            flask_session["vault_authenticated"] = True
+            return redirect("/")
+        return render_template_string(_LOGIN_PAGE, csrf=secrets.token_urlsafe(32), error="Incorrect password."), 401
+    csrf = secrets.token_urlsafe(32)
+    flask_session["login_csrf"] = csrf
+    return render_template_string(_LOGIN_PAGE, csrf=csrf, error="")
+
+_LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vault Login</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1220;color:#e8eef8;font:16px system-ui}
+main{width:min(92vw,390px);padding:30px;border:1px solid #26344b;border-radius:18px;background:#111c2e}
+h1{margin:0 0 8px;font-size:24px}p{color:#aab8cc}input,button{width:100%;padding:13px;border-radius:10px;font:inherit}
+input{border:1px solid #40516c;background:#0b1220;color:white;margin:14px 0}button{border:0;background:#8bb8ff;color:#08111f;font-weight:700;cursor:pointer}
+.err{color:#ff9b9b}
+</style></head><body><main><h1>Vault Login</h1><p>Enter your Vault access password to continue.</p>
+<form method="post" action="/auth/login"><input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="password" name="password" placeholder="Access password" autocomplete="current-password" required autofocus>
+<button type="submit">Unlock Vault</button></form>{% if error %}<p class="err">{{ error }}</p>{% endif %}</main></body></html>"""
+
+@app.post("/auth/logout")
+def vault_logout():
+    flask_session.clear()
+    return redirect(url_for("vault_login"))
 
 @app.after_request
 def _vault_headers(resp):
