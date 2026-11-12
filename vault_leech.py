@@ -480,7 +480,7 @@ if __name__ == "__main__":
 MAX_BYTES = 500 * 1024 * 1024
 _WAKE = threading.Event()
 _REEL_RUNTIME = {"app": None, "store": None, "load_key": None, "started": False}
-_REEL_URL_RE = re.compile(r"^https?://(?:www\\.)?instagram\\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+/?(?:\\?.*)?$", re.I)
+_REEL_URL_RE = re.compile(r"^https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+/?(?:\?.*)?$", re.I)
 
 
 def _valid_reel_url(raw):
